@@ -254,3 +254,35 @@ func TestLocalForwardPorts(t *testing.T) {
 		t.Errorf("未开跳转时只应放行反代端口，得到 %v", got)
 	}
 }
+
+// 端口转发没启用时，反代自己的监听端口仍要被防火墙放行：
+// 外网映射 DNAT 到路由器自身后走 INPUT，不放行就会被默认 WAN 策略拦掉。
+func TestPersistScriptOpensLocalPortsWhenForwardDisabled(t *testing.T) {
+	fc := testForwardConfig()
+	fc.Enable = false
+	fc.Rules = nil
+	fc.Hairpin = false
+	fc.LocalPorts = []int{16666}
+
+	script := renderPersistScript(fwTool{kind: "iptables", bin: "iptables"}, fc)
+	must := []string{
+		"$IPT -I INPUT 1 -j LP_IN",
+		"$IPT -A LP_IN -p tcp --dport 16666 -j ACCEPT",
+	}
+	for _, m := range must {
+		if !strings.Contains(script, m) {
+			t.Errorf("转发关闭时开机脚本缺少: %s\n---\n%s", m, script)
+		}
+	}
+	if strings.Contains(script, "DNAT") || strings.Contains(script, "MASQUERADE") {
+		t.Errorf("转发关闭时不应出现 DNAT/MASQUERADE:/n%s", script)
+	}
+
+	s := buildNftScript(fc)
+	if !strings.Contains(s, "tcp dport { 16666 } accept") {
+		t.Errorf("nft 脚本未放行端口:\n%s", s)
+	}
+	if strings.Contains(s, "dnat") {
+		t.Errorf("转发关闭时 nft 脚本不应有 dnat:/n%s", s)
+	}
+}

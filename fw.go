@@ -535,12 +535,17 @@ func (m *ForwardManager) Snapshot() FirewallState {
 }
 
 // Apply 是幂等的：重复调用只会 flush 并重写自己的链。
+//
+// 注意：端口放行（LP_IN）与端口转发规则是解耦的——即使用户没启用端口转发，
+// 反代自己的监听端口也要在路由器防火墙上放行。外网映射进来的流量 DNAT 到
+// 路由器自身后走 INPUT 链，会被默认的 WAN 入站策略拦掉（小米等固件只对
+// 映射时的原始外网端口放行，不放行转换后的本机端口）。
 func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 未启用：尽力清理内核残留，但环境里没有防火墙工具不算错误
-	if !fc.Enable {
+	// 什么都没有：尽力清理内核残留，环境里没有防火墙工具不算错误
+	if !fc.Enable && len(fc.LocalPorts) == 0 {
 		st := FirewallState{Backend: "off", Updated: time.Now()}
 		if t, derr := detectFirewall(fc.Backend); derr == nil && t.kind != "none" {
 			if err := t.clear(); err != nil {
@@ -558,10 +563,23 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	if derr != nil {
 		st.Err = derr.Error()
 		m.state = st
-		if m.logs != nil {
-			m.logs.Errorf("端口转发不可用: %v", derr)
+		// 只放行监听端口属于尽力而为（比如 Windows 上没有 iptables），不作为错误
+		if fc.Enable {
+			if m.logs != nil {
+				m.logs.Errorf("端口转发不可用: %v", derr)
+			}
+			return derr
 		}
-		return derr
+		if m.logs != nil {
+			m.logs.Warnf("防火墙工具不可用，未能自动放行反代端口: %v", derr)
+		}
+		return nil
+	}
+
+	// 端口转发未启用：不下发转发规则，只放行本机监听端口
+	if !fc.Enable {
+		fc.Rules = nil
+		fc.Hairpin = false
 	}
 
 	if err := t.apply(fc); err != nil {
@@ -569,7 +587,7 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 		st.Err = err.Error()
 		m.state = st
 		if m.logs != nil {
-			m.logs.Errorf("端口转发下发失败，已回滚: %v", err)
+			m.logs.Errorf("防火墙规则下发失败，已回滚: %v", err)
 		}
 		return err
 	}
@@ -582,7 +600,11 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 
 	m.state = st
 	if m.logs != nil {
-		m.logs.Infof("端口转发已生效：%d 条规则（%s），%s", st.Applied, t.kind, st.Persist)
+		if fc.Enable {
+			m.logs.Infof("端口转发已生效：%d 条规则（%s），%s", st.Applied, t.kind, st.Persist)
+		} else {
+			m.logs.Infof("端口转发未启用；已自动放行反代监听端口 %v（%s），%s", fc.LocalPorts, t.kind, st.Persist)
+		}
 	}
 	return nil
 }

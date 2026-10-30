@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.0.0"
+var version = "1.0.1"
 
 type App struct {
 	mu      sync.Mutex
@@ -897,6 +897,8 @@ func (a *App) handleForwardClear(w http.ResponseWriter, r *http.Request) {
 	cfg := a.Config()
 	fc := cfg.Forward
 	fc.Enable = false
+	// 清的是转发规则，反代自己的监听端口要继续放行
+	fc.LocalPorts = localForwardPorts(cfg)
 	if err := a.forward.Apply(fc); err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
