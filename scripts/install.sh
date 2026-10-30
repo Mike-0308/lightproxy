@@ -1,113 +1,354 @@
 #!/bin/sh
 # 轻代理 lightproxy 安装脚本（在路由器上执行，busybox sh 兼容）
 #
-#   本地安装：  sh install.sh /tmp/lightproxy-armv7
-#   一行安装：  curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
-#              （自动识别架构并从 GitHub Releases 下载对应二进制）
-#   一行卸载：  curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
-#   本地卸载：  sh install.sh --uninstall
+#   一键安装（推荐，会弹出菜单）：
+#     curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+#   管道方式（同样能弹菜单，脚本自己读 /dev/tty）：
+#     curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
+#   非交互安装（写进别的脚本里批量用）：
+#     sh install.sh --yes --dir=/data/lightproxy
+#   卸载：菜单里选 2，或者 sh install.sh --uninstall
+#   本地二进制安装（电脑下载好再传上去）：
+#     sh install.sh /tmp/lightproxy-linux-armv7
 set -u
 
-# 默认仓库；一行安装时从这里下载二进制，可用环境变量 LP_REPO 覆盖（owner/repo）
+# 默认仓库；下载二进制时用，可用 LP_REPO 覆盖（owner/repo）
 DEFAULT_REPO="Mike-0308/lightproxy"
+# 自定义镜像可放最前面：LP_MIRROR="https://your.mirror" sh install.sh
+LP_MIRROR="${LP_MIRROR:-}"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+line() { printf '%s\n' '──────────────────────────────────────────'; }
 
-BIN_SRC="${1:-}"
+# 交互一律走 /dev/tty：这样 `curl … | sh` 也不会去抢脚本自身的 stdin。
+# 只开一次文件描述符，别用 read < /dev/tty 反复重开（EOF 后会一直读到空）。
+TTYS=0
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  # 先用子 shell 探一下能不能打开：直接 exec 失败会让非交互 shell 整个退出
+  if ( : </dev/tty ) 2>/dev/null; then
+    { exec 3</dev/tty; } 2>/dev/null && TTYS=1
+  fi
+fi
+
+REPLY=""
+prompt_read() {   # $1=提示，结果存 REPLY；返回 1 表示读不到输入（EOF/无终端）
+  REPLY=""
+  [ "$TTYS" = 1 ] || return 1
+  printf '%s' "$1"
+  if ! IFS= read -r REPLY <&3; then
+    [ -n "$REPLY" ] || return 1
+  fi
+  return 0
+}
+
+ask_yes() {       # $1=提示，默认否
+  prompt_read "$1 [y/N]: " || return 1
+  case "$REPLY" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+usage() {
+  say "用法: sh install.sh [选项] [二进制路径]"
+  say ""
+  say "  不带参数            进入交互菜单（安装 / 卸载 / 退出）"
+  say "  --install, -i       直接安装，不问菜单"
+  say "  --uninstall, -u     卸载"
+  say "  --dir=PATH          指定安装目录，如 --dir=/data/lightproxy"
+  say "  --yes, -y           全部确认，不再提问"
+  say "  /tmp/lightproxy-*   安装本地已下载好的二进制"
+}
+
+# ---------------------------------------------------------------- 参数
+BIN_SRC=""
+DIR_ARG=""
+MODE=""
+ASSUME_YES=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --uninstall|-u)  MODE=uninstall ;;
+    --install|-i)    MODE=install ;;
+    --yes|-y)        ASSUME_YES=1 ;;
+    --dir)           shift; DIR_ARG="${1:-}" ;;
+    --dir=*)         DIR_ARG="${1#--dir=}" ;;
+    -h|--help)       usage; exit 0 ;;
+    -*)              err "未知参数: $1（-h 看用法）"; exit 2 ;;
+    *)               BIN_SRC="$1"; [ -n "$MODE" ] || MODE=install ;;
+  esac
+  shift
+done
 
 # ---------------------------------------------------------------- 卸载
+SCAN_DIRS="/data/lightproxy /opt/lightproxy /etc/lightproxy /tmp/lightproxy"
+
+do_remove() {   # $1=安装目录
+  P="$1"
+  say "卸载 $P"
+  # 先摘掉开机挂钩再停进程，避免 procd 的 respawn 又把它拉起来
+  if [ -f /etc/init.d/lightproxy ]; then
+    /etc/init.d/lightproxy disable >/dev/null 2>&1
+    /etc/init.d/lightproxy stop >/dev/null 2>&1
+    rm -f /etc/init.d/lightproxy
+  fi
+  [ -x "$P/ctl" ] && "$P/ctl" stop >/dev/null 2>&1
+  if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
+    uci -q delete firewall.lightproxy >/dev/null 2>&1
+    uci -q delete firewall.lightproxy_fw >/dev/null 2>&1
+    uci commit firewall >/dev/null 2>&1
+  fi
+  if [ -f /etc/rc.local ]; then
+    sed -i "\|$P/ctl start|d" /etc/rc.local 2>/dev/null
+    sed -i "\|$P/startup.sh|d" /etc/rc.local 2>/dev/null
+  fi
+  if [ -f /etc/crontabs/root ]; then
+    sed -i "\|$P/ctl start|d" /etc/crontabs/root 2>/dev/null
+  fi
+  rm -rf "$P"
+}
+
 uninstall_all() {
-  for P in /data/lightproxy /opt/lightproxy /etc/lightproxy /tmp/lightproxy; do
-    [ -d "$P" ] || continue
-    say "卸载 $P"
-    # 先摘掉开机挂钩再停进程，避免 procd 的 respawn 又把它拉起来
-    if [ -f /etc/init.d/lightproxy ]; then
-      /etc/init.d/lightproxy disable >/dev/null 2>&1
-      /etc/init.d/lightproxy stop >/dev/null 2>&1
-      rm -f /etc/init.d/lightproxy
-    fi
-    [ -x "$P/ctl" ] && "$P/ctl" stop >/dev/null 2>&1
-    if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
-      uci -q delete firewall.lightproxy >/dev/null 2>&1
-      uci -q delete firewall.lightproxy_fw >/dev/null 2>&1
-      uci commit firewall >/dev/null 2>&1
-    fi
-    if [ -f /etc/rc.local ]; then
-      sed -i "\|$P/ctl start|d" /etc/rc.local 2>/dev/null
-      sed -i "\|$P/startup.sh|d" /etc/rc.local 2>/dev/null
-    fi
-    if [ -f /etc/crontabs/root ]; then
-      sed -i "\|$P/ctl start|d" /etc/crontabs/root 2>/dev/null
-    fi
-    rm -rf "$P"
+  FOUND=""
+  for P in $SCAN_DIRS; do
+    [ -d "$P" ] && FOUND="$FOUND $P"
   done
-  say "已卸载。配置与证书随目录一并删除；如需保留配置，"
-  say "卸载前先在面板「设置 → 配置备份 → 导出配置」下载一份。"
+
+  if [ -z "$FOUND" ]; then
+    warn "没有找到已安装的 lightproxy"
+    say "查找过的位置: $SCAN_DIRS"
+    exit 0
+  fi
+
+  say "找到以下安装："
+  for P in $FOUND; do say "  - $P"; done
+  if [ "$ASSUME_YES" = 0 ] && [ "$TTYS" = 1 ]; then
+    if ! ask_yes "确认全部卸载？配置和证书会一并删除，无法恢复"; then
+      say "已取消"
+      exit 0
+    fi
+  fi
+
+  for P in $FOUND; do do_remove "$P"; done
+  say ""
+  say "已卸载。配置与证书随目录一并删除。"
+  say "下次想保留配置，可以卸载前先在面板「设置 → 配置备份 → 导出备份」下载 zip。"
   exit 0
 }
 
-if [ "$BIN_SRC" = "--uninstall" ]; then
+if [ "$MODE" = "uninstall" ]; then
   uninstall_all
 fi
 
-# ---------------------------------------------------------------- 一行安装：自动下载
+# ---------------------------------------------------------------- 菜单
+if [ -z "$MODE" ]; then
+  if [ "$TTYS" != 1 ]; then
+    # 没有终端（cron、重定向）就别问，直接装
+    MODE=install
+  else
+    line
+    say " 轻代理 lightproxy 安装向导"
+    line
+    say "  1) 安装 / 升级"
+    say "  2) 卸载"
+    say "  3) 退出"
+    if ! prompt_read "请选择 [1]: "; then
+      say ""
+      say "没有读到输入（终端已断开），已退出"
+      exit 1
+    fi
+    case "${REPLY:-1}" in
+      1|"")  MODE=install ;;
+      2)     MODE=uninstall ;;
+      3|q|Q) say "已退出"; exit 0 ;;
+      *)     err "无效选择: $REPLY"; exit 2 ;;
+    esac
+    if [ "$MODE" = "uninstall" ]; then
+      uninstall_all
+    fi
+    say ""
+  fi
+fi
+
+# ---------------------------------------------------------------- 安装目录
+writable() {    # $1=目录
+  mkdir -p "$1" 2>/dev/null || return 1
+  ( : > "$1/.probe" ) 2>/dev/null || return 1
+  rm -f "$1/.probe"
+  return 0
+}
+
+existing_dir() {   # 输出已安装目录，没有则返回 1
+  for D in $SCAN_DIRS; do
+    [ -x "$D/bin/lightproxy" ] && { printf '%s' "$D"; return 0; }
+  done
+  return 1
+}
+
+default_dir() {
+  for D in /data/lightproxy /opt/lightproxy /etc/lightproxy; do
+    [ -d "$(dirname "$D")" ] || continue
+    writable "$D" && { PREFIX="$D"; return 0; }
+  done
+  PREFIX=/tmp/lightproxy
+  writable "$PREFIX" || return 1
+  return 0
+}
+
+PREFIX=""
+EXIST=$(existing_dir) || EXIST=""
+
+if [ -n "$DIR_ARG" ]; then
+  if writable "$DIR_ARG"; then
+    PREFIX="$DIR_ARG"
+  else
+    err "指定目录不可写: $DIR_ARG"
+    exit 1
+  fi
+elif [ "$TTYS" != 1 ] || [ "$ASSUME_YES" = 1 ]; then
+  # 非交互：优先沿用已有安装，其次按常规顺序挑
+  if [ -n "$EXIST" ]; then PREFIX="$EXIST"; else default_dir || { err "没有可写的安装目录"; exit 1; }; fi
+else
+  line
+  say " 选择安装目录"
+  line
+  say "  1) /data/lightproxy   （推荐，重启不丢）"
+  say "  2) /opt/lightproxy"
+  say "  3) /etc/lightproxy    （根分区空间紧张时用）"
+  say "  4) 手动输入完整路径"
+  say "  0) 退出"
+  if [ -n "$EXIST" ]; then
+    say ""
+    say " 提示：检测到已安装在 $EXIST，选它即为升级（配置保留）"
+  fi
+  while : ; do
+    if ! prompt_read "请选择 [1]: "; then say ""; say "没有读到输入，已退出"; exit 1; fi
+    CH="${REPLY:-1}"
+    case "$CH" in
+      0|q|Q) say "已退出"; exit 0 ;;
+      1) CAND="/data/lightproxy" ;;
+      2) CAND="/opt/lightproxy" ;;
+      3) CAND="/etc/lightproxy" ;;
+      4)
+        if ! prompt_read "输入完整路径（例如 /mnt/usb/lightproxy）: "; then say ""; say "没有读到输入，已退出"; exit 1; fi
+        CAND="$REPLY"
+        case "$CAND" in
+          /*) : ;;
+          *)  warn "要填绝对路径，比如 /mnt/usb/lightproxy"; continue ;;
+        esac
+        ;;
+      *) warn "无效选择: $CH"; continue ;;
+    esac
+    if writable "$CAND"; then
+      PREFIX="$CAND"
+      break
+    fi
+    warn "$CAND 不可写（分区只读或权限不足），换一个"
+  done
+fi
+
+FREE=$(df -k "$PREFIX" 2>/dev/null | awk 'NR==2{printf "%.1fMB", $4/1024}')
+say "安装目录: $PREFIX${FREE:+（可用 $FREE）}"
+mkdir -p "$PREFIX/bin" "$PREFIX/run"
+
+
+# ---------------------------------------------------------------- 二进制：下载 or 本地传入
+REPO="${LP_REPO:-$DEFAULT_REPO}"
+ARCH=$(uname -m)
+case "$ARCH" in
+  armv7l|armv7|armv6l|arm) FILE="lightproxy-linux-armv7" ;;
+  aarch64|arm64)           FILE="lightproxy-linux-arm64" ;;
+  mips*)                   FILE="lightproxy-linux-mipsle" ;;
+  x86_64|amd64)            FILE="lightproxy-linux-amd64" ;;
+  *)                       FILE="" ;;
+esac
+
+fetch_one() {   # $1=URL $2=输出文件
+  rm -f "$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --connect-timeout 12 --retry 1 --progress-bar -o "$2" "$1" && return 0
+    # 部分固件的 curl 是 busybox applet，不认 --progress-bar
+    curl -fsSL --connect-timeout 12 -o "$2" "$1" && return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -O "$2" -T 60 "$1" && return 0
+  fi
+  return 1
+}
+
+download_bin() {
+  BASE="https://github.com/$REPO/releases/latest/download/$FILE"
+  LIST="$BASE
+https://ghfast.top/$BASE
+https://gh-proxy.com/$BASE
+https://ghproxy.net/$BASE"
+  if [ -n "$LP_MIRROR" ]; then
+    LIST="$LP_MIRROR
+$LIST"
+  fi
+
+  say "需要下载 $FILE（约 7MB）。网速慢时会等几分钟，别急："
+  say "下面有进度条；卡住不动时每 10 秒会打一个 [秒数]，说明还在等，"
+  say "单个源超过 60 秒没进度会自动换下一个镜像。"
+  for U in $LIST; do
+    HOST=$(printf '%s' "$U" | sed 's|^[a-z]*://||; s|/.*||')
+    say ""
+    say "→ 尝试 $HOST"
+    OUT="/tmp/$FILE.part"
+    ( i=0; while : ; do sleep 10; i=$((i+10)); printf '[%ss]' "$i" >&2; done ) & WD=$!
+    fetch_one "$U" "$OUT"; RC=$?
+    kill "$WD" 2>/dev/null
+    wait "$WD" 2>/dev/null
+    SIZE=0
+    if [ -f "$OUT" ]; then
+      SIZE=$(wc -c < "$OUT" 2>/dev/null | tr -d ' ')
+      [ -n "$SIZE" ] || SIZE=0
+    fi
+    if [ "$RC" = 0 ] && [ "$SIZE" -ge 3000000 ]; then
+      say "✓ 下载完成（$((SIZE/1024/1024))MB）"
+      BIN_SRC="$OUT"
+      return 0
+    fi
+    if [ "$RC" = 0 ]; then
+      warn "文件太小（$SIZE 字节），可能被劫持或中断"
+    else
+      warn "这个源连不上（返回 $RC）"
+    fi
+    rm -f "$OUT"
+  done
+  return 1
+}
+
 if [ -z "$BIN_SRC" ]; then
-  REPO="${LP_REPO:-$DEFAULT_REPO}"
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    armv7l|armv7|armv6l|arm) FILE="lightproxy-linux-armv7" ;;
-    aarch64|arm64)           FILE="lightproxy-linux-arm64" ;;
-    mips*)                   FILE="lightproxy-linux-mipsle" ;;
-    x86_64|amd64)            FILE="lightproxy-linux-amd64" ;;
-    *) err "无法识别架构 $ARCH，请手动下载对应二进制后：sh install.sh <二进制路径>"; exit 1 ;;
-  esac
-  URL="https://github.com/$REPO/releases/latest/download/$FILE"
-  say "一行安装：从 $URL 下载 …"
-  BIN_SRC="/tmp/$FILE"
-  if ! curl -fsSL --retry 3 -o "$BIN_SRC" "$URL" 2>/dev/null && \
-     ! wget -q -O "$BIN_SRC" "$URL" 2>/dev/null; then
-    err "下载失败：$URL"
-    err "请检查网络，或手动下载后执行 sh install.sh $FILE"
+  if [ -z "$FILE" ]; then
+    err "无法识别架构 $ARCH"
+    err "请手动下载对应二进制，再执行：sh install.sh <二进制路径>"
+    exit 1
+  fi
+  if ! download_bin; then
+    err ""
+    err "几个下载源都没成功，可以试试："
+    err "  1) 换网络（手机热点）后重跑本脚本"
+    err "  2) 电脑上下载 https://github.com/$REPO/releases/latest/download/$FILE"
+    err "     再 scp 到路由器执行：sh install.sh /tmp/$FILE"
     exit 1
   fi
 fi
 
-if [ ! -f "$BIN_SRC" ]; then
-  err "用法: sh install.sh <二进制路径>"
-  err "  或一行安装: curl -fsSL <install.sh 地址> | sh"
+if [ ! -f "${BIN_SRC:-}" ]; then
+  err "用法: sh install.sh [二进制路径] [--dir=目录] [--uninstall] [--yes]"
+  err "  不带参数运行会进入交互菜单"
   exit 1
 fi
 
-ARCH=$(uname -m)
-say "设备架构: $ARCH"
+HINT="（未知架构）"
 case "$ARCH" in
   armv7l|armv7|armv6l|arm) HINT="lightproxy-linux-armv7" ;;
   aarch64|arm64)           HINT="lightproxy-linux-arm64" ;;
   mips*)                   HINT="lightproxy-linux-mipsle" ;;
   x86_64|amd64)            HINT="lightproxy-linux-amd64" ;;
-  *)                       HINT="（未知架构）" ;;
 esac
+say "设备架构: $ARCH"
 say "对应二进制: $HINT"
-
-# ---------------------------------------------------------------- 安装目录
-PREFIX=""
-for d in /data/lightproxy /opt/lightproxy /etc/lightproxy; do
-  parent=$(dirname "$d")
-  [ -d "$parent" ] || continue
-  if mkdir -p "$d" 2>/dev/null && ( : > "$d/.probe" ) 2>/dev/null; then
-    rm -f "$d/.probe"
-    PREFIX="$d"
-    break
-  fi
-done
-if [ -z "$PREFIX" ]; then
-  PREFIX=/tmp/lightproxy
-  warn "警告：/data、/opt、/etc 都不可写，临时装到 /tmp（重启会丢失）"
-fi
-say "安装目录: $PREFIX"
-mkdir -p "$PREFIX/bin" "$PREFIX/run"
 
 # ---------------------------------------------------------------- 二进制自检
 if ! cp "$BIN_SRC" "$PREFIX/bin/lightproxy.new"; then
@@ -115,6 +356,8 @@ if ! cp "$BIN_SRC" "$PREFIX/bin/lightproxy.new"; then
   exit 1
 fi
 chmod +x "$PREFIX/bin/lightproxy.new"
+# 已经复制到目标分区，/tmp 下载的临时文件可以删了，别占闪存（用户自己传的二进制不动）
+case "$BIN_SRC" in /tmp/*.part) rm -f "$BIN_SRC" ;; esac
 
 say "试运行 …"
 if ! VER=$("$PREFIX/bin/lightproxy.new" -v 2>&1); then

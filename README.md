@@ -58,20 +58,72 @@
 - 内存环形日志（最近 600 条，不占闪存）
 - 一键重启、证书热重载
 
-## 一行安装
+## 安装
 
-路由器 SSH 里执行（自动识别架构、从 GitHub Releases 下载、配置自启）：
+路由器 SSH 里执行，会弹出向导（先选做什么，再选装到哪）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+```
+
+向导长这样：
+
+```
+──────────────────────────────────────────
+ 轻代理 lightproxy 安装向导
+──────────────────────────────────────────
+  1) 安装 / 升级
+  2) 卸载
+  3) 退出
+请选择 [1]:
+```
+
+选完再选安装目录：
+
+```
+ 选择安装目录
+  1) /data/lightproxy   （推荐，重启不丢）
+  2) /opt/lightproxy
+  3) /etc/lightproxy    （根分区空间紧张时用）
+  4) 手动输入完整路径
+  0) 退出
+```
+
+手动输入支持任意绝对路径（比如 `/mnt/usb/lightproxy`），会先校验目录可写再继续。
+
+之后脚本自动完成：识别架构 → 下载对应二进制 → 试运行自检 → 写默认配置 → 挂开机自启 → 启动。
+
+**下载 7MB 左右，网慢要等几分钟**，脚本会把话说清楚：有进度条；卡住时每 10 秒打一个 `[秒数]` 表示还在等；某个源连不上自动换镜像（GitHub → `ghfast.top` → `gh-proxy.com` → `ghproxy.net`），不用你干预。
+
+> 之前装过的话，向导会提示「检测到已安装在 xxx」，选它即为升级，配置和证书都保留。
+
+管道方式也能弹菜单（脚本从 `/dev/tty` 读输入，不抢 stdin）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
 ```
 
-也可以先下载再装：
+不想交互（写进别的脚本里批量跑）：
 
 ```bash
-# 上传二进制和安装脚本
+sh /tmp/lp.sh --yes --dir=/data/lightproxy
+```
+
+全部参数（`sh /tmp/lp.sh -h` 也能看）：
+
+| 参数 | 作用 |
+|---|---|
+| 无参数 | 进入交互向导 |
+| `--install` / `-i` | 直接安装，跳过菜单 |
+| `--uninstall` / `-u` | 卸载（等价菜单选 2） |
+| `--dir=/path` | 指定安装目录 |
+| `--yes` / `-y` | 全部确认，不再提问 |
+| `/tmp/lightproxy-armv7` | 安装本地已下载好的二进制 |
+
+本地安装（电脑下载好再传上去，适合路由器连不上外网）：
+
+```bash
 scp dist/lightproxy-linux-armv7 scripts/install.sh root@192.168.10.1:/tmp/
-# SSH 进去安装（配置已存在时会保留）
 ssh root@192.168.10.1 "sh /tmp/install.sh /tmp/lightproxy-linux-armv7"
 ```
 
@@ -93,17 +145,19 @@ ssh root@192.168.10.1 "sh /tmp/install.sh /data/lightproxy/bin/lightproxy"
 /data/lightproxy/ctl verify     # 重启后服务没起来？看自启挂钩与启动日志
 ```
 
-**卸载**（停服务、清掉全部自启挂钩、删除程序与配置目录）：
+## 卸载
+
+向导里选 **2** 就行。也可以直接命令行：
 
 ```bash
-# 已把 install.sh 传到路由器的情况
-sh /tmp/install.sh --uninstall
+sh /tmp/lp.sh --uninstall
 
 # 没传过脚本时，一行远程卸载
 curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
 ```
 
-卸载会先摘掉开机挂钩再停进程（避免 procd 的 respawn 又拉起来），然后删除 `/data/lightproxy`。
+会先列出找到的所有安装目录（`/data/lightproxy`、`/opt/lightproxy`、`/etc/lightproxy`、`/tmp/lightproxy`），确认后先摘掉开机挂钩再停进程（避免 procd 的 respawn 又拉起来），最后删除目录。
+
 如需保留配置，卸载前先在面板「设置 → 配置备份 → 导出备份」下载一份 zip。
 
 ## 开机自启
@@ -257,7 +311,7 @@ lightproxy/
 ├── admin.go           管理面板 API 与会话
 ├── logs.go            环形日志（512KB 自动轮转）
 ├── web/               内嵌前端（单页，无框架）
-├── scripts/install.sh 路由器安装/卸载脚本（支持一行安装）
+├── scripts/install.sh 路由器安装脚本（向导式：安装 / 卸载 / 选目录）
 └── test/              mock 阿里云 API、echo 后端、WS 测试
 ```
 
