@@ -423,7 +423,7 @@ function collectConfig() {
   syncRecords(c);
 
   // 监听 / 面板 / 运行时
-  c.listen = $('#s-listen').value.trim() || ':8080';
+  c.listen = $('#s-listen').value.trim() || ':18080';
   c.admin = c.admin || {};
   c.admin.listen = $('#s-admin').value.trim() || '0.0.0.0:8081';
   c.admin.user = $('#s-user').value.trim() || 'admin';

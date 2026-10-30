@@ -179,9 +179,9 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 
 | 字段 | 说明 |
 |---|---|
-| `listen` | 反代监听，默认 `:8080` |
+| `listen` | 反代监听，默认 `:18080`（避开 8080，防止占用路由器管理后台端口） |
 | `admin.listen` / `admin.pass` | 面板地址与密码；`pass` 留空则免登录（仅限内网） |
-| `tls.redirect` | HTTP 自动 301 到 HTTPS |
+| `tls.redirect` | HTTP 自动 301 到 HTTPS（仅域名访问跳转，IP 直连不跳转） |
 | `tls.httpListen` | HTTP 跳转监听地址，勾选跳转后留空默认 `:80` |
 | `tls.publicPort` | 外网访问的 HTTPS 端口（非 443 时跳转会带上），默认 443 |
 | `security.requireDomain` | 外网只允许域名访问（IP 直连 403）；内网与本机始终放行 |

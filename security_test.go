@@ -130,3 +130,39 @@ func TestRedirectKeepsPublicPort(t *testing.T) {
 		t.Errorf("Location 期望 %s，得到 %s", want, rec2.Header().Get("Location"))
 	}
 }
+
+// Host 是 IP 字面量时不跳转（内网 IP 直连的 http 服务不能被强行拽到 https），
+// 交回反代按正常规则处理；只有域名访问才 301。
+func TestRedirectSkipsIPHost(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TLS.PublicPort = 8443
+	a := &App{cfg: cfg}
+	a.proxy.Store(&Proxy{})
+
+	for _, host := range []string{
+		"192.168.10.1",          // IPv4 不带端口
+		"192.168.10.1:80",       // IPv4 带端口
+		"203.0.113.7",           // 公网 IPv4 也不跳转（拦不拦由访问控制管）
+		"[fd00::9]:80",          // IPv6 ULA
+		"[2408:8274:abcd::9]:80", // 公网 IPv6
+	} {
+		rec := httptest.NewRecorder()
+		a.redirectHandler().ServeHTTP(rec, newReq(host, "192.168.10.50:5000"))
+		if rec.Code == http.StatusMovedPermanently || rec.Code == http.StatusFound {
+			t.Errorf("IP 访问 %s 不应跳转，实际 %d", host, rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != "" {
+			t.Errorf("IP 访问 %s 不应带 Location，实际 %s", host, loc)
+		}
+	}
+
+	// 域名访问仍然 301 到 HTTPS（带公网端口）
+	rec := httptest.NewRecorder()
+	a.redirectHandler().ServeHTTP(rec, newReq("nas.example.com:80", "192.168.10.50:5000"))
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("域名访问期望 301，得到 %d", rec.Code)
+	}
+	if want := "https://nas.example.com:8443/"; rec.Header().Get("Location") != want {
+		t.Errorf("Location 期望 %s，得到 %s", want, rec.Header().Get("Location"))
+	}
+}

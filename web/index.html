@@ -257,7 +257,7 @@
     <div class="card">
       <div class="card-hd"><h2>监听与面板</h2></div>
       <div class="form grid2">
-        <label class="row"><span>反代监听地址</span><input id="s-listen" placeholder=":8080"></label>
+        <label class="row"><span>反代监听地址</span><input id="s-listen" placeholder=":18080"></label>
         <label class="row"><span>面板监听地址</span><input id="s-admin" placeholder="0.0.0.0:8081"></label>
         <label class="row"><span>面板账号</span><input id="s-user" placeholder="admin"></label>
         <label class="row"><span>面板密码</span><input id="s-pass" type="text" placeholder="留空则不需要登录"></label>
@@ -279,7 +279,7 @@
       </div>
       <div class="form">
         <label class="row checks-inline"><span>HTTP 跳转</span>
-          <label class="chk"><input type="checkbox" id="s-redirect"> 访问 HTTP 时自动 301 到 HTTPS</label>
+          <label class="chk"><input type="checkbox" id="s-redirect"> 访问 HTTP 时自动 301 到 HTTPS（仅域名访问跳转，IP 直连不跳转）</label>
         </label>
         <label class="row"><span>HTTP 监听地址</span><input id="s-httplisten" placeholder=":80（留空则用 :80）"></label>
       </div>

@@ -135,7 +135,7 @@ type ForwardRule struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		Listen: ":8080",
+		Listen: ":18080",
 		Admin: AdminConfig{
 			Listen: "0.0.0.0:8081",
 			User:   "admin",
@@ -224,9 +224,11 @@ func checkListen(addr, what string) error {
 func (c *Config) Normalize() error {
 	c.Listen = strings.TrimSpace(c.Listen)
 	if c.Listen == "" {
-		c.Listen = ":8080"
+		// 默认避开 8080：小米等路由器的管理后台（LuCI）用它，
+		// 抢了端口会导致路由器 Web 端打不开。
+		c.Listen = ":18080"
 	}
-	if err := checkListen(c.Listen, "反代监听地址（应形如 :8080）"); err != nil {
+	if err := checkListen(c.Listen, "反代监听地址（应形如 :18080）"); err != nil {
 		return err
 	}
 

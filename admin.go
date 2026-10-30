@@ -28,7 +28,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.3.0"
+var version = "1.3.1"
 
 type App struct {
 	mu      sync.Mutex
@@ -331,12 +331,22 @@ func (a *App) guardedAdmin() http.Handler {
 }
 
 // redirectHandler 把 HTTP 请求 301 到 HTTPS。
+// 只对域名访问跳转：Host 是 IP 字面量（内网常用 IP 直连，外网也可能有）时
+// 不跳转，交回反代正常处理——否则内网 http 服务会被强行拽到 https 打不开。
 // 外网映射端口不是 443 时（例如 8443），Location 里要带上端口，否则跳过去打不开。
 func (a *App) redirectHandler() http.Handler {
+	proxy := a.proxyHandler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
-		if h, _, err := splitHostPort(host); err == nil && h != "" {
+		if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
 			host = h
+		} else if h, _, err := splitHostPort(host); err == nil && h != "" {
+			host = h
+		}
+		host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
+		if net.ParseIP(host) != nil {
+			proxy.ServeHTTP(w, r)
+			return
 		}
 		target := "https://" + host
 		if p := a.Config().TLS.PublicPort; p != 0 && p != 443 {

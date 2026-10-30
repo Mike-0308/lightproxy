@@ -17,7 +17,7 @@ func main() {
 	var check, showVersion bool
 
 	flag.StringVar(&cfgPath, "c", "", "配置文件路径（默认与程序同目录的 config.json）")
-	flag.StringVar(&listenOverride, "listen", "", "临时覆盖反向代理监听地址，如 :8080")
+	flag.StringVar(&listenOverride, "listen", "", "临时覆盖反向代理监听地址，如 :18080")
 	flag.StringVar(&adminOverride, "admin", "", "临时覆盖管理面板监听地址，如 0.0.0.0:8081")
 	flag.BoolVar(&check, "check", false, "只检查配置是否合法，然后退出")
 	flag.BoolVar(&showVersion, "v", false, "显示版本")
