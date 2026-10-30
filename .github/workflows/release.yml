@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run tests
+        run: go test ./... -count=1
+
+      - name: Build all platforms
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          [ -n "$VER" ] || VER=$(grep -m1 '^var version' admin.go | sed 's/.*"\(.*\)".*/\1/')
+          LDFLAGS="-s -w -X main.version=$VER"
+          mkdir -p dist
+          GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "$LDFLAGS" -o dist/lightproxy-linux-armv7 .
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" -o dist/lightproxy-linux-arm64 .
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o dist/lightproxy-linux-amd64 .
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags "$LDFLAGS" -o dist/lightproxy-linux-mipsle .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o dist/lightproxy-windows-amd64.exe .
+          # 用 ELF 头核对每个产物的真实架构，防交叉编译配置漂移
+          go run ./scripts/elfcheck.go dist/lightproxy-linux-armv7:40 dist/lightproxy-linux-arm64:183 dist/lightproxy-linux-amd64:62 dist/lightproxy-linux-mipsle:8
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightproxy-binaries
+          path: dist/lightproxy-*
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/lightproxy-*
+            scripts/install.sh

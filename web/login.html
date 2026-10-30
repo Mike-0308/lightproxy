@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轻代理 · 登录</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body class="login-body">
+<form class="login" id="loginForm">
+  <div class="brand center">
+    <span class="logo"></span>
+    <span class="name">轻代理</span>
+  </div>
+  <p class="login-tip">轻量反向代理 · 阿里云 DDNS</p>
+  <label class="row"><span>用户名</span><input id="user" value="admin" autocomplete="username"></label>
+  <label class="row"><span>密码</span><input id="pass" type="password" autocomplete="current-password" autofocus></label>
+  <div class="err hidden" id="loginErr"></div>
+  <button class="primary block" type="submit">登录</button>
+  <p class="login-foot">忘记密码？在路由器上查看 <code>config.json</code> 的 admin.pass，或改成空字符串免登录。</p>
+</form>
+<script>
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('loginErr');
+  err.classList.add('hidden');
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user: document.getElementById('user').value,
+        pass: document.getElementById('pass').value,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '登录失败');
+    location.href = '/';
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.classList.remove('hidden');
+  }
+});
+</script>
+</body>
+</html>

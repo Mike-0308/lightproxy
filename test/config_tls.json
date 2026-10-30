@@ -1,0 +1,59 @@
+{
+  "listen": ":18443",
+  "admin": {
+    "listen": "127.0.0.1:18081",
+    "user": "admin",
+    "pass": "test1234"
+  },
+  "tls": {
+    "enable": true,
+    "certDir": "test/certs",
+    "httpListen": ":18082"
+  },
+  "proxy": [
+    {
+      "name": "静态站",
+      "hosts": [
+        "site.test"
+      ],
+      "path": "/",
+      "target": "http://127.0.0.1:18101"
+    },
+    {
+      "name": "子路径",
+      "hosts": [
+        "site.test"
+      ],
+      "path": "/api",
+      "target": "http://127.0.0.1:18102"
+    },
+    {
+      "name": "泛域名",
+      "hosts": [
+        "*.wild.test"
+      ],
+      "path": "/",
+      "target": "http://127.0.0.1:18101",
+      "preserveHost": true
+    },
+    {
+      "name": "WS 测试",
+      "hosts": [
+        "ws.test"
+      ],
+      "path": "/",
+      "target": "http://127.0.0.1:18103"
+    }
+  ],
+  "ddns": {
+    "enable": false,
+    "provider": "aliyun",
+    "interval": 300,
+    "ipMode": "api",
+    "ttl": 600
+  },
+  "runtime": {
+    "memLimitMB": 32,
+    "accessLog": true
+  }
+}

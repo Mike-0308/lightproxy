@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>轻代理 · 控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <span class="logo"></span>
+    <span class="name">轻代理</span>
+    <span class="ver" id="ver">v1.0.0</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="on" data-tab="overview">概览</button>
+    <button data-tab="proxy">反向代理</button>
+    <button data-tab="forward">端口转发</button>
+    <button data-tab="ddns">DDNS</button>
+    <button data-tab="acme">证书</button>
+    <button data-tab="logs">日志</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+  <button class="ghost" id="btnLogout">退出</button>
+</header>
+
+<main>
+
+  <!-- 概览 -->
+  <section id="tab-overview" class="tab">
+    <div class="stats">
+      <div class="stat"><span class="k">运行时长</span><b id="ov-uptime">—</b></div>
+      <div class="stat"><span class="k">内存占用</span><b id="ov-mem">—</b></div>
+      <div class="stat"><span class="k">累计请求</span><b id="ov-req">—</b></div>
+      <div class="stat"><span class="k">在线连接</span><b id="ov-live">—</b></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>服务信息</h2><span class="hint" id="ov-restart"></span></div>
+      <dl class="kv">
+        <dt>反代入口</dt><dd id="ov-listen">—</dd>
+        <dt>管理面板</dt><dd id="ov-admin">—</dd>
+        <dt>HTTPS</dt><dd id="ov-tls">—</dd>
+        <dt>版本 / 主机</dt><dd id="ov-ver">—</dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>转发规则</h2><a class="link" data-goto="proxy">管理 →</a></div>
+      <div id="ov-rules" class="mini-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>DDNS</h2><a class="link" data-goto="ddns">管理 →</a></div>
+      <div id="ov-ddns" class="mini-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>端口转发</h2><a class="link" data-goto="forward">管理 →</a></div>
+      <div id="ov-fwd" class="mini-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>证书</h2><a class="link" data-goto="acme">管理 →</a></div>
+      <div id="ov-acme" class="mini-list"></div>
+    </div>
+  </section>
+
+  <!-- 反向代理 -->
+  <section id="tab-proxy" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>反向代理规则</h2>
+        <button id="btnAddRule" class="primary sm">+ 新增规则</button>
+      </div>
+      <p class="tip">按「域名 + 路径前缀」匹配请求；路径前缀会从上游路径中剥离。支持 <code>*.example.com</code> 泛域名与 WebSocket。</p>
+      <div id="ruleList" class="rule-list"></div>
+    </div>
+
+    <div class="card hidden" id="editor">
+      <div class="card-hd"><h2 id="editorTitle">新增规则</h2></div>
+      <div class="form">
+        <label class="row"><span>名称</span><input id="r-name" placeholder="例如：家里的 NAS"></label>
+        <label class="row"><span>域名</span><input id="r-hosts" placeholder="nas.example.com, *.pan.example.com"></label>
+        <label class="row"><span>路径前缀</span><input id="r-path" placeholder="/ 或 /api"></label>
+        <label class="row"><span>上游地址</span><input id="r-target" placeholder="http://192.168.31.10:5000"></label>
+        <label class="row"><span>自定义请求头</span><textarea id="r-headers" rows="2" placeholder="每行一个，例如：X-Real-IP: {client}"></textarea></label>
+        <label class="row"><span>删除请求头</span><input id="r-delHeaders" placeholder="逗号分隔，例如 Cookie,Referer"></label>
+        <div class="checks">
+          <label><input type="checkbox" id="r-preserveHost"> 保留原始 Host</label>
+          <label><input type="checkbox" id="r-insecure"> 跳过上游证书校验</label>
+          <label><input type="checkbox" id="r-disable"> 停用此规则</label>
+        </div>
+        <div class="err hidden" id="ruleErr"></div>
+        <div class="actions">
+          <button class="primary" id="btnSaveRule">保存</button>
+          <button class="ghost" id="btnCancelRule">取消</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 端口转发 -->
+  <section id="tab-forward" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>端口转发</h2>
+        <label class="switch"><input type="checkbox" id="f-enable"><span></span>启用</label>
+      </div>
+      <p class="tip">转发由内核 DNAT 直接完成，不占进程内存，并发再高也只是消耗连接跟踪表。规则只写进本工具自己的链（<code>LP_FWD</code> / <code>LP_ACL</code> / <code>LP_IN</code>），出问题可整体清空，不动系统已有规则。<b>需要以 root 运行。</b><br>
+        开启本页后，<b>反代监听端口</b>（以及勾选「HTTP 自动跳转」时的 HTTP 端口）会一并写进 INPUT 放行——
+        这样路由器自带的 IPv6 防火墙全开时，也只有这几个端口和下面规则里的端口能从外网进来；管理面板端口不会被放行。</p>
+      <div class="form grid2">
+        <label class="row"><span>防火墙后端</span>
+          <select id="f-backend">
+            <option value="auto">自动探测（推荐）</option>
+            <option value="iptables">iptables（fw3 / fw4 都可用）</option>
+            <option value="nftables">nftables</option>
+            <option value="off">只在面板保存，不下发</option>
+          </select>
+        </label>
+        <label class="row checks-inline span2"><span>内网回环</span>
+          <label class="chk"><input type="checkbox" id="f-hairpin"> 允许内网设备用公网 IP 访问</label>
+        </label>
+      </div>
+
+      <h3 class="sub">转发规则</h3>
+      <div class="fw-head">
+        <span>名称</span><span>协议</span><span>外网端口</span><span>目标地址</span><span>目标端口</span><span>停用</span><span></span>
+      </div>
+      <div id="fwdList" class="fw-list"></div>
+      <button class="ghost sm" id="btnAddFwd">+ 添加规则</button>
+
+      <div class="actions wrap">
+        <button class="primary" id="btnSaveFwd">保存并下发</button>
+        <button class="ghost" id="btnApplyFwd">按当前配置重新下发</button>
+        <button class="ghost danger-text" id="btnClearFwd">清空内核规则</button>
+      </div>
+      <div class="err hidden" id="fwdErr"></div>
+      <div class="ok hidden" id="fwdOk"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>生效状态</h2><span class="hint" id="fwdMeta"></span></div>
+      <div id="fwdStatus" class="mini-list"></div>
+    </div>
+  </section>
+
+  <!-- 自动证书 -->
+  <section id="tab-acme" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>自动证书</h2>
+        <label class="switch"><input type="checkbox" id="a-enable"><span></span>启用</label>
+      </div>
+      <p class="tip">走 DNS-01 验证：用阿里云解析自动添加 TXT 记录，<b>不占用 80 端口</b>，不和反向代理抢路径，还支持泛域名。签发后写入证书目录并热加载，剩余天数低于阈值时自动续期。</p>
+      <div class="form grid2">
+        <label class="row"><span>联系邮箱</span><input id="a-email" placeholder="you@example.com"></label>
+        <label class="row"><span>证书颁发机构</span>
+          <select id="a-ca">
+            <option value="letsencrypt">Let's Encrypt（推荐）</option>
+            <option value="letsencrypt-staging">Let's Encrypt 测试环境</option>
+            <option value="zerossl">ZeroSSL</option>
+          </select>
+        </label>
+        <label class="row span2"><span>域名（每行一个）</span><textarea id="a-domains" rows="2" placeholder="nas.example.com&#10;*.pan.example.com"></textarea></label>
+        <label class="row"><span>证书目录</span><input id="a-certdir" placeholder="/data/certs"></label>
+        <label class="row"><span>私钥类型</span>
+          <select id="a-keytype">
+            <option value="ec256">ECDSA P-256（推荐，路由器上更快）</option>
+            <option value="rsa2048">RSA 2048（老设备兼容性更好）</option>
+          </select>
+        </label>
+        <label class="row"><span>提前续期（天）</span><input id="a-renewdays" type="number" min="7" max="60"></label>
+        <label class="row"><span>AccessKey ID</span><input id="a-ak" autocomplete="off" placeholder="留空则复用 DDNS 页填的"></label>
+        <label class="row"><span>AccessKey Secret</span><input id="a-sk" type="password" autocomplete="new-password" placeholder="留空则复用 DDNS 页填的"></label>
+      </div>
+      <div class="actions wrap">
+        <button class="primary" id="btnSaveACME">保存设置</button>
+        <button class="ghost" id="btnTestACME">检查配置</button>
+        <button class="ghost" id="btnIssueACME">立即签发</button>
+      </div>
+      <div class="err hidden" id="acmeErr"></div>
+      <div class="ok hidden" id="acmeOk"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>证书状态</h2><span class="hint" id="acmeMeta"></span></div>
+      <div id="acmeStatus" class="mini-list"></div>
+    </div>
+  </section>
+
+  <!-- DDNS -->
+  <section id="tab-ddns" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>阿里云 DDNS</h2>
+        <label class="switch"><input type="checkbox" id="d-enable"><span></span>启用</label>
+      </div>
+      <p class="tip">只支持阿里云解析（AliDNS）。AccessKey 建议用子账号并只授予 <code>AliyunDNSFullAccess</code>。</p>
+      <div class="form grid2">
+        <label class="row"><span>AccessKey ID</span><input id="d-ak" autocomplete="off" placeholder="LTAI..."></label>
+        <label class="row"><span>AccessKey Secret</span><input id="d-sk" type="password" autocomplete="new-password" placeholder="********"></label>
+        <label class="row"><span>IP 获取方式</span>
+          <select id="d-mode">
+            <option value="api">在线接口查询（推荐）</option>
+            <option value="interface">读取网卡地址（PPPoE 拨号用）</option>
+          </select>
+        </label>
+        <label class="row"><span>网卡名（可选）</span><input id="d-iface" placeholder="pppoe-wan / eth0.2"></label>
+        <label class="row"><span>检测间隔（秒）</span><input id="d-interval" type="number" min="60" step="30"></label>
+        <label class="row"><span>默认 TTL</span><input id="d-ttl" type="number" min="60" step="60"></label>
+        <label class="row span2"><span>IP 查询源</span><input id="d-sources" placeholder="每行或逗号分隔，留空用内置源"></label>
+      </div>
+
+      <h3 class="sub">解析记录</h3>
+      <p class="tip">「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。
+        也可以直接在域名栏写完整域名 <code>*.example.com</code>，保存时会自动拆开。</p>
+      <div id="recList" class="rec-list"></div>
+      <button class="ghost sm" id="btnAddRec">+ 添加记录</button>
+
+      <div class="actions wrap">
+        <button class="primary" id="btnSaveDDNS">保存并生效</button>
+        <button class="ghost" id="btnTestAK">测试 AccessKey</button>
+        <button class="ghost" id="btnDetectIP">检测公网 IP</button>
+        <button class="ghost" id="btnRunDDNS">立即同步</button>
+      </div>
+      <div class="err hidden" id="ddnsErr"></div>
+      <div class="ok hidden" id="ddnsOk"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>同步状态</h2><span class="hint" id="ddnsMeta"></span></div>
+      <div id="ddnsStatus" class="mini-list"></div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>运行日志</h2>
+        <div class="actions">
+          <label class="chk"><input type="checkbox" id="autoLog" checked> 自动刷新</label>
+          <button class="ghost sm" id="btnRefreshLogs">刷新</button>
+        </div>
+      </div>
+      <pre id="logBox" class="logs">加载中…</pre>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab hidden">
+    <div class="card">
+      <div class="card-hd"><h2>监听与面板</h2></div>
+      <div class="form grid2">
+        <label class="row"><span>反代监听地址</span><input id="s-listen" placeholder=":8080"></label>
+        <label class="row"><span>面板监听地址</span><input id="s-admin" placeholder="0.0.0.0:8081"></label>
+        <label class="row"><span>面板账号</span><input id="s-user" placeholder="admin"></label>
+        <label class="row"><span>面板密码</span><input id="s-pass" type="text" placeholder="留空则不需要登录"></label>
+        <label class="row"><span>内存上限（MB）</span><input id="s-mem" type="number" min="16" step="8"></label>
+        <label class="row span2 checks-inline">
+          <label class="chk"><input type="checkbox" id="s-access"> 记录访问日志</label>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>HTTPS</h2><label class="switch"><input type="checkbox" id="s-tls"><span></span>启用</label></div>
+      <p class="tip">支持单张默认证书，或一个目录（按 SNI 自动匹配，文件名用域名，如 <code>nas.example.com.crt</code> + <code>.key</code>）。更换证书后按「重载证书」即可，无需重启。</p>
+      <div class="form grid2">
+        <label class="row"><span>证书文件</span><input id="s-cert" placeholder="/data/certs/fullchain.pem"></label>
+        <label class="row"><span>私钥文件</span><input id="s-key" placeholder="/data/certs/privkey.pem"></label>
+        <label class="row"><span>证书目录（可选）</span><input id="s-certdir" placeholder="/data/certs"></label>
+        <label class="row"><span>HTTPS 公网端口</span><input id="s-pubport" type="number" min="1" max="65535" placeholder="443"></label>
+      </div>
+      <div class="form">
+        <label class="row checks-inline"><span>HTTP 跳转</span>
+          <label class="chk"><input type="checkbox" id="s-redirect"> 访问 HTTP 时自动 301 到 HTTPS</label>
+        </label>
+        <label class="row"><span>HTTP 监听地址</span><input id="s-httplisten" placeholder=":80（留空则用 :80）"></label>
+      </div>
+      <p class="tip">公网端口填外网实际访问的 HTTPS 端口（例如路由器把 443 映射到 8443，就填 8443），跳转时会带上它。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>访问控制</h2></div>
+      <p class="tip">路由器自带的 IPv6 防火墙能挡端口，但挡不住「IP:端口 直接打开面板」。打开下面这项后，
+        凡是用 IP 访问的一律 403，只认反向代理规则里配置的域名——配合「端口转发」页的自动放行，就是「只有域名能进」。</p>
+      <div class="form">
+        <label class="row checks-inline"><span>只允许域名访问</span>
+          <label class="chk"><input type="checkbox" id="s-reqdomain"> 禁止用 IP 直接访问反代与面板</label>
+        </label>
+        <label class="row checks-inline"><span>本机回环</span>
+          <label class="chk"><input type="checkbox" id="s-loopback"> 允许 127.0.0.1 / ::1 访问面板（防自锁，建议保留）</label>
+        </label>
+        <label class="row"><span>额外允许的域名</span><input id="s-extrahosts" placeholder="可留空，多个用逗号分隔"></label>
+      </div>
+      <p class="tip">开启后请确认已有一条反代规则指向 <code>http://127.0.0.1:8081</code>，否则只能靠 SSH 隧道进面板救急。</p>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="btnSaveSettings">保存设置</button>
+      <button class="ghost" id="btnReloadCert">重载证书</button>
+      <button class="danger" id="btnRestart">重启服务</button>
+    </div>
+    <div class="err hidden" id="setErr"></div>
+    <div class="ok hidden" id="setOk"></div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

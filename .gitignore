@@ -1,0 +1,15 @@
+# 本地构建产物与运行时文件，不进仓库
+lightproxy
+lightproxy-dev.exe
+lightproxy.new
+*.pid
+config.json
+*.log
+.venv/
+
+# 测试运行痕迹
+test/certs/
+test/*.txt
+
+# 构建输出（发布走 GitHub Releases，不把二进制放进仓库）
+dist/

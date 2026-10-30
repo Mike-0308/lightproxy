@@ -1,0 +1,21 @@
+{
+  "listen": ":18600",
+  "admin": { "listen": "127.0.0.1:18601", "user": "admin", "pass": "" },
+  "tls": { "enable": false },
+  "proxy": [
+    { "name": "群晖 NAS", "hosts": ["nas.example.com"], "path": "/", "target": "http://192.168.31.10:5000" },
+    { "name": "路由器后台", "hosts": ["router.example.com"], "path": "/", "target": "http://192.168.31.1", "preserveHost": true },
+    { "name": "接口服务", "hosts": ["app.example.com"], "path": "/api", "target": "http://192.168.31.20:3000", "headers": { "X-Real-IP": "{client}" } }
+  ],
+  "ddns": {
+    "enable": true, "provider": "aliyun",
+    "accessKeyId": "testid", "accessKeySecret": "testsecret",
+    "records": [
+      { "domain": "example.com", "rr": "home", "type": "A" },
+      { "domain": "example.com", "rr": "nas", "type": "A" }
+    ],
+    "interval": 300, "ipMode": "api",
+    "ipSources": ["http://127.0.0.1:18109/ip"], "ttl": 600
+  },
+  "runtime": { "memLimitMB": 32, "accessLog": true }
+}

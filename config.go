@@ -1,0 +1,545 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Config 是全部配置。整体序列化为一个 JSON 文件，路由器上手工改也很方便。
+type Config struct {
+	Listen   string         `json:"listen"`
+	Admin    AdminConfig    `json:"admin"`
+	TLS      TLSConfig      `json:"tls"`
+	Security SecurityConfig `json:"security"`
+	Proxy    []Rule         `json:"proxy"`
+	DDNS     DDNSConfig     `json:"ddns"`
+	ACME     ACMEConfig     `json:"acme"`
+	Forward  ForwardConfig  `json:"forward"`
+	Runtime  RuntimeConfig  `json:"runtime"`
+}
+
+type AdminConfig struct {
+	Listen string `json:"listen"`
+	User   string `json:"user"`
+	Pass   string `json:"pass"`
+}
+
+// SecurityConfig 是「只允许用域名访问」相关的开关。
+// 路由器开着 IPv6 防火墙时，光靠防火墙只能挡端口，挡不住「IP:端口 直接访问」；
+// 打开 RequireDomain 后，凡是 Host 是 IP 字面量的请求一律拒绝，只认域名。
+type SecurityConfig struct {
+	RequireDomain bool     `json:"requireDomain"`
+	AllowLoopback bool     `json:"allowLoopback"`
+	ExtraHosts    []string `json:"extraHosts,omitempty"`
+}
+
+type TLSConfig struct {
+	Enable     bool   `json:"enable"`
+	Cert       string `json:"cert"`
+	Key        string `json:"key"`
+	CertDir    string `json:"certDir"`
+	HTTPListen string `json:"httpListen"`
+	// Redirect 打开后，HTTP 监听上的请求统一 301 到 HTTPS。
+	Redirect bool `json:"redirect"`
+	// PublicPort 是外网看到的 HTTPS 端口（非 443 时跳转要带上）。
+	PublicPort int `json:"publicPort,omitempty"`
+}
+
+type Rule struct {
+	Name         string            `json:"name"`
+	Disable      bool              `json:"disable,omitempty"`
+	Hosts        []string          `json:"hosts"`
+	Path         string            `json:"path"`
+	Target       string            `json:"target"`
+	PreserveHost bool              `json:"preserveHost,omitempty"`
+	Insecure     bool              `json:"insecure,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	DelHeaders   []string          `json:"delHeaders,omitempty"`
+}
+
+type DDNSConfig struct {
+	Enable    bool        `json:"enable"`
+	Provider  string      `json:"provider"`
+	AccessKey string      `json:"accessKeyId"`
+	SecretKey string      `json:"accessKeySecret"`
+	Records   []DNSRecord `json:"records"`
+	Interval  int         `json:"interval"`
+	IPMode    string      `json:"ipMode"`
+	Interface string      `json:"interface"`
+	IPSources []string    `json:"ipSources"`
+	TTL       int         `json:"ttl"`
+	Insecure  bool        `json:"insecure,omitempty"`
+}
+
+type DNSRecord struct {
+	Domain  string `json:"domain"`
+	RR      string `json:"rr"`
+	Type    string `json:"type"`
+	TTL     int    `json:"ttl,omitempty"`
+	Disable bool   `json:"disable,omitempty"`
+}
+
+type RuntimeConfig struct {
+	MemLimitMB int    `json:"memLimitMB"`
+	AccessLog  bool   `json:"accessLog"`
+	LogFile    string `json:"logFile"`
+}
+
+// ACMEConfig 是自动申请证书的配置。走 DNS-01，复用阿里云解析，
+// 不占用 80 端口，也不会和反向代理抢域名验证路径。
+type ACMEConfig struct {
+	Enable    bool     `json:"enable"`
+	Email     string   `json:"email"`
+	CA        string   `json:"ca"`
+	Domains   []string `json:"domains"`
+	CertDir   string   `json:"certDir"`
+	KeyType   string   `json:"keyType"`
+	RenewDays int      `json:"renewDays"`
+	AccessKey string   `json:"accessKeyId,omitempty"`
+	SecretKey string   `json:"accessKeySecret,omitempty"`
+	Insecure  bool     `json:"insecure,omitempty"`
+}
+
+type ForwardConfig struct {
+	Enable  bool          `json:"enable"`
+	Backend string        `json:"backend"`
+	Hairpin bool          `json:"hairpin,omitempty"`
+	Rules   []ForwardRule `json:"rules"`
+	// LocalPorts 由程序在运行时填充（反代监听端口 + HTTP 跳转端口），不写进配置文件。
+	// 开启端口转发后会一并写进 INPUT 放行，这样路由器自带防火墙开着也能从外网访问到反代；
+	// 管理面板端口不在其中，永远不对外放行。
+	LocalPorts []int `json:"-"`
+}
+
+// ForwardRule 是一条「外网端口 → 内网主机」的内核 DNAT 规则。
+// 转发在内核完成，不占用用户态内存，并发再高也只是消耗连接跟踪表。
+type ForwardRule struct {
+	Name    string `json:"name"`
+	Disable bool   `json:"disable,omitempty"`
+	Proto   string `json:"proto"`
+	Port    int    `json:"port"`
+	ToHost  string `json:"toHost"`
+	ToPort  int    `json:"toPort"`
+	Note    string `json:"note,omitempty"`
+}
+
+func DefaultConfig() *Config {
+	return &Config{
+		Listen: ":8080",
+		Admin: AdminConfig{
+			Listen: "0.0.0.0:8081",
+			User:   "admin",
+			Pass:   "",
+		},
+		Proxy: []Rule{},
+		DDNS: DDNSConfig{
+			Provider:  "aliyun",
+			Interval:  300,
+			IPMode:    "api",
+			TTL:       600,
+			IPSources: []string{"http://ip.3322.net", "http://ddns.oray.com/checkip", "https://api.ipify.org"},
+		},
+		ACME:     ACMEConfig{CA: "letsencrypt", KeyType: "ec256", RenewDays: 30},
+		Forward:  ForwardConfig{Backend: "auto"},
+		Security: SecurityConfig{AllowLoopback: true},
+		Runtime:  RuntimeConfig{MemLimitMB: 32, AccessLog: false},
+	}
+}
+
+// LoadConfig 读取配置；文件不存在时生成默认配置并返回 firstRun=true。
+func LoadConfig(path string) (cfg *Config, firstRun bool, err error) {
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		if !os.IsNotExist(rerr) {
+			return nil, false, rerr
+		}
+		c := DefaultConfig()
+		c.Admin.Pass = randomPassword()
+		if werr := SaveConfig(path, c); werr != nil {
+			return nil, false, werr
+		}
+		return c, true, nil
+	}
+	c := DefaultConfig()
+	if err := json.Unmarshal(data, c); err != nil {
+		return nil, false, fmt.Errorf("配置文件不是合法 JSON: %w", err)
+	}
+	if err := c.Normalize(); err != nil {
+		return nil, false, err
+	}
+	return c, false, nil
+}
+
+// SaveConfig 原子写入，权限 0600（含 AccessKey 等敏感信息）。
+func SaveConfig(path string, c *Config) error {
+	if err := c.Normalize(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// Normalize 补默认值并校验，返回第一条错误。
+func (c *Config) Normalize() error {
+	c.Listen = strings.TrimSpace(c.Listen)
+	if c.Listen == "" {
+		c.Listen = ":8080"
+	}
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("反代监听地址无效（应形如 :8080）: %s", c.Listen)
+	}
+
+	c.Admin.Listen = strings.TrimSpace(c.Admin.Listen)
+	if c.Admin.Listen == "" {
+		c.Admin.Listen = "0.0.0.0:8081"
+	}
+	if _, _, err := net.SplitHostPort(c.Admin.Listen); err != nil {
+		return fmt.Errorf("管理面板监听地址无效（应形如 0.0.0.0:8081）: %s", c.Admin.Listen)
+	}
+	if c.Admin.User == "" {
+		c.Admin.User = "admin"
+	}
+
+	if c.TLS.Enable {
+		if c.TLS.Cert == "" && c.TLS.CertDir == "" {
+			return fmt.Errorf("启用 HTTPS 时至少需要填写证书文件或证书目录")
+		}
+		if c.TLS.Cert != "" && c.TLS.Key == "" {
+			return fmt.Errorf("已填写证书文件，但缺少私钥文件")
+		}
+	}
+	if c.TLS.HTTPListen != "" {
+		if _, _, err := net.SplitHostPort(c.TLS.HTTPListen); err != nil {
+			return fmt.Errorf("HTTP 跳转监听地址无效: %s", c.TLS.HTTPListen)
+		}
+	}
+	// 勾了「HTTP 自动跳转」但没填监听地址时，默认接管 80
+	if c.TLS.Redirect && c.TLS.HTTPListen == "" {
+		c.TLS.HTTPListen = ":80"
+	}
+	if c.TLS.PublicPort < 0 || c.TLS.PublicPort > 65535 {
+		return fmt.Errorf("HTTPS 公网端口无效: %d", c.TLS.PublicPort)
+	}
+	if c.TLS.PublicPort == 0 {
+		c.TLS.PublicPort = 443
+	}
+
+	// 只允许域名访问：额外放行的域名统一小写、去端口、去结尾点
+	var extra []string
+	for _, h := range c.Security.ExtraHosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if hp, _, err := net.SplitHostPort(h); err == nil && hp != "" {
+			h = hp
+		}
+		extra = append(extra, strings.TrimSuffix(h, "."))
+	}
+	c.Security.ExtraHosts = extra
+
+	names := map[string]bool{}
+	for i := range c.Proxy {
+		r := &c.Proxy[i]
+		r.Name = strings.TrimSpace(r.Name)
+		if r.Name == "" {
+			r.Name = fmt.Sprintf("规则 %d", i+1)
+		}
+		if names[r.Name] {
+			return fmt.Errorf("规则名重复: %s", r.Name)
+		}
+		names[r.Name] = true
+
+		var hosts []string
+		for _, h := range r.Hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" {
+				continue
+			}
+			if hp, _, err := net.SplitHostPort(h); err == nil && hp != "" {
+				h = hp
+			}
+			hosts = append(hosts, strings.TrimSuffix(h, "."))
+		}
+		if len(hosts) == 0 {
+			return fmt.Errorf("规则「%s」没有填写域名", r.Name)
+		}
+		r.Hosts = hosts
+		r.Path = normalizePath(r.Path)
+
+		t := strings.TrimSpace(r.Target)
+		if t == "" {
+			return fmt.Errorf("规则「%s」没有填写上游地址", r.Name)
+		}
+		if !strings.Contains(t, "://") {
+			t = "http://" + t
+		}
+		u, err := url.Parse(t)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("规则「%s」上游地址无效: %s", r.Name, r.Target)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("规则「%s」上游只支持 http/https", r.Name)
+		}
+		r.Target = strings.TrimRight(t, "/")
+
+		if r.Headers != nil {
+			clean := make(map[string]string, len(r.Headers))
+			for k, v := range r.Headers {
+				if k = strings.TrimSpace(k); k != "" {
+					clean[k] = v
+				}
+			}
+			r.Headers = clean
+		}
+	}
+
+	d := &c.DDNS
+	if d.Provider == "" {
+		d.Provider = "aliyun"
+	}
+	if d.Interval < 60 {
+		d.Interval = 300
+	}
+	if d.TTL <= 0 {
+		d.TTL = 600
+	}
+	if d.IPMode == "" {
+		d.IPMode = "api"
+	}
+	if d.Enable {
+		if d.Provider != "aliyun" {
+			return fmt.Errorf("DDNS 目前只支持 aliyun")
+		}
+		if strings.TrimSpace(d.AccessKey) == "" || strings.TrimSpace(d.SecretKey) == "" {
+			return fmt.Errorf("启用 DDNS 需要填写 AccessKey ID 与 Secret")
+		}
+		if len(d.Records) == 0 {
+			return fmt.Errorf("启用 DDNS 但没有任何域名记录")
+		}
+	}
+	for i := range d.Records {
+		r := &d.Records[i]
+		r.Domain = strings.ToLower(strings.TrimSpace(r.Domain))
+		r.RR = strings.TrimSpace(r.RR)
+		if r.RR == "" {
+			r.RR = "@"
+		}
+		r.Type = strings.ToUpper(strings.TrimSpace(r.Type))
+		if r.Type == "" {
+			r.Type = "A"
+		}
+		if r.Type != "A" && r.Type != "AAAA" {
+			return fmt.Errorf("记录 %s.%s 的类型只能是 A 或 AAAA", r.RR, r.Domain)
+		}
+		if r.Domain == "" || !strings.Contains(r.Domain, ".") {
+			return fmt.Errorf("第 %d 条记录的域名无效: %q", i+1, r.Domain)
+		}
+	}
+	if d.IPMode == "interface" && strings.TrimSpace(d.Interface) == "" && !d.Enable {
+		// 允许未启用时留空
+	}
+
+	if err := c.normalizeACME(); err != nil {
+		return err
+	}
+	if err := c.normalizeForward(); err != nil {
+		return err
+	}
+	if c.Runtime.MemLimitMB > 0 && c.Runtime.MemLimitMB < 16 {
+		c.Runtime.MemLimitMB = 16
+	}
+	return nil
+}
+
+func (c *Config) normalizeACME() error {
+	ac := &c.ACME
+	ac.Email = strings.TrimSpace(ac.Email)
+	ac.CA = strings.TrimSpace(ac.CA)
+	if ac.CA == "" {
+		ac.CA = "letsencrypt"
+	}
+	if ac.KeyType != "rsa2048" {
+		ac.KeyType = "ec256"
+	}
+	if ac.RenewDays < 7 {
+		ac.RenewDays = 30
+	}
+	if ac.RenewDays > 60 {
+		ac.RenewDays = 60
+	}
+	ac.CertDir = strings.TrimSpace(ac.CertDir)
+	if ac.CertDir == "" {
+		ac.CertDir = c.TLS.CertDir
+	}
+
+	var doms []string
+	seen := map[string]bool{}
+	for _, d := range ac.Domains {
+		d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+		if d == "" || seen[d] {
+			continue
+		}
+		if net.ParseIP(d) != nil {
+			return fmt.Errorf("证书域名不能填 IP 地址: %s（IP 证书需要 HTTP-01 或手动签发）", d)
+		}
+		if !strings.Contains(strings.TrimPrefix(d, "*."), ".") {
+			return fmt.Errorf("证书域名无效: %q", d)
+		}
+		seen[d] = true
+		doms = append(doms, d)
+	}
+	ac.Domains = doms
+
+	if !ac.Enable {
+		return nil
+	}
+	if len(doms) == 0 {
+		return fmt.Errorf("启用自动证书但没有任何域名")
+	}
+	// AccessKey 留空时复用 DDNS 的那一份，但不写回配置——
+	// 否则以后改 DDNS 的密钥，自动证书这边会一直用旧的。
+	if strings.TrimSpace(ac.AccessKey) == "" && strings.TrimSpace(c.DDNS.AccessKey) == "" {
+		return fmt.Errorf("启用自动证书需要阿里云 AccessKey（可在 DDNS 页填写后自动复用）")
+	}
+	if ac.CertDir == "" {
+		return fmt.Errorf("启用自动证书需要指定证书目录")
+	}
+	if ac.Email == "" {
+		return fmt.Errorf("启用自动证书需要填写联系邮箱（CA 用于到期提醒）")
+	}
+	return nil
+}
+
+func (c *Config) normalizeForward() error {
+	fc := &c.Forward
+	fc.Backend = strings.ToLower(strings.TrimSpace(fc.Backend))
+	if fc.Backend == "" {
+		fc.Backend = "auto"
+	}
+	switch fc.Backend {
+	case "auto", "iptables", "nftables", "off":
+	default:
+		return fmt.Errorf("端口转发后端只能是 auto/iptables/nftables/off，收到 %q", fc.Backend)
+	}
+
+	names := map[string]bool{}
+	used := map[string]bool{}
+	for i := range fc.Rules {
+		r := &fc.Rules[i]
+		r.Name = strings.TrimSpace(r.Name)
+		if r.Name == "" {
+			r.Name = fmt.Sprintf("转发 %d", i+1)
+		}
+		if names[r.Name] {
+			return fmt.Errorf("端口转发规则名重复: %s", r.Name)
+		}
+		names[r.Name] = true
+
+		r.Proto = strings.ToLower(strings.TrimSpace(r.Proto))
+		if r.Proto == "" {
+			r.Proto = "tcp"
+		}
+		if r.Proto != "tcp" && r.Proto != "udp" && r.Proto != "both" {
+			return fmt.Errorf("规则「%s」的协议只能是 tcp/udp/both", r.Name)
+		}
+		if r.Port < 1 || r.Port > 65535 {
+			return fmt.Errorf("规则「%s」的外网端口无效: %d", r.Name, r.Port)
+		}
+		if r.ToPort < 1 || r.ToPort > 65535 {
+			return fmt.Errorf("规则「%s」的目标端口无效: %d", r.Name, r.ToPort)
+		}
+		r.ToHost = strings.TrimSpace(r.ToHost)
+		ip := net.ParseIP(r.ToHost)
+		if ip == nil {
+			return fmt.Errorf("规则「%s」的目标主机必须是 IP，不能用域名（DNAT 在内核完成，不做解析）", r.Name)
+		}
+		if ip.To4() == nil {
+			return fmt.Errorf("规则「%s」的目标主机暂只支持 IPv4 地址", r.Name)
+		}
+		r.ToHost = ip.To4().String()
+		if !r.Disable {
+			for _, p := range protoList(r.Proto) {
+				key := fmt.Sprintf("%s:%d", p, r.Port)
+				if used[key] {
+					return fmt.Errorf("外网端口 %d/%s 被多条规则重复占用", r.Port, p)
+				}
+				used[key] = true
+			}
+		}
+	}
+	return nil
+}
+
+func protoList(p string) []string {
+	if p == "both" {
+		return []string{"tcp", "udp"}
+	}
+	return []string{p}
+}
+
+func normalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "/" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
+func randomPassword() string {
+	b := make([]byte, 5)
+	if _, err := rand.Read(b); err != nil {
+		return "admin888"
+	}
+	return hex.EncodeToString(b)
+}
+
+func defaultConfigPath() string {
+	if p := os.Getenv("LP_CONFIG"); p != "" {
+		return p
+	}
+	if exe, err := os.Executable(); err == nil {
+		p := filepath.Join(filepath.Dir(exe), "config.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if _, err := os.Stat("/etc/lightproxy/config.json"); err == nil {
+		return "/etc/lightproxy/config.json"
+	}
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "config.json")
+	}
+	return "config.json"
+}

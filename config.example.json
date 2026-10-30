@@ -1,0 +1,97 @@
+{
+  "listen": ":8080",
+  "admin": {
+    "listen": "0.0.0.0:8081",
+    "user": "admin",
+    "pass": "改成你自己的密码"
+  },
+  "tls": {
+    "enable": true,
+    "cert": "",
+    "key": "",
+    "certDir": "/data/lightproxy/certs",
+    "httpListen": ":80",
+    "redirect": true,
+    "publicPort": 443
+  },
+  "security": {
+    "requireDomain": false,
+    "allowLoopback": true,
+    "extraHosts": []
+  },
+  "proxy": [
+    {
+      "name": "群晖 NAS",
+      "hosts": ["nas.example.com"],
+      "path": "/",
+      "target": "http://192.168.31.10:5000"
+    },
+    {
+      "name": "路由器后台",
+      "hosts": ["router.example.com"],
+      "path": "/",
+      "target": "http://192.168.31.1",
+      "preserveHost": true
+    },
+    {
+      "name": "管理面板（藏到域名后面）",
+      "hosts": ["panel.example.com"],
+      "path": "/",
+      "target": "http://127.0.0.1:8081"
+    },
+    {
+      "name": "同一域名下的接口",
+      "hosts": ["app.example.com"],
+      "path": "/api",
+      "target": "http://192.168.31.20:3000",
+      "headers": {
+        "X-Real-IP": "{client}"
+      },
+      "delHeaders": ["Cookie"]
+    },
+    {
+      "name": "泛域名",
+      "hosts": ["*.dev.example.com"],
+      "path": "/",
+      "target": "http://192.168.31.30:8080",
+      "insecure": true
+    }
+  ],
+  "ddns": {
+    "enable": true,
+    "provider": "aliyun",
+    "accessKeyId": "LTAI5tXXXXXXXXXXXXXXXX",
+    "accessKeySecret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "records": [
+      { "domain": "example.com", "rr": "home", "type": "A" },
+      { "domain": "example.com", "rr": "*", "type": "A" }
+    ],
+    "interval": 300,
+    "ipMode": "api",
+    "interface": "",
+    "ipSources": ["http://ip.3322.net", "http://ddns.oray.com/checkip", "https://api.ipify.org"],
+    "ttl": 600
+  },
+  "acme": {
+    "enable": false,
+    "email": "you@example.com",
+    "ca": "letsencrypt",
+    "domains": ["nas.example.com", "*.pan.example.com"],
+    "certDir": "/data/lightproxy/certs",
+    "keyType": "ec256",
+    "renewDays": 30
+  },
+  "forward": {
+    "enable": true,
+    "backend": "auto",
+    "hairpin": true,
+    "rules": [
+      { "name": "反代 HTTPS", "proto": "tcp", "port": 443, "toHost": "192.168.31.1", "toPort": 8443 }
+    ]
+  },
+  "runtime": {
+    "memLimitMB": 32,
+    "accessLog": false,
+    "logFile": ""
+  }
+}

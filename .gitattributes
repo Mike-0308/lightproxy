@@ -1,0 +1,4 @@
+# 一律 LF：路由器上的 shell 脚本带 CRLF 会直接跑不起来
+* text=auto eol=lf
+*.png binary
+*.zip binary

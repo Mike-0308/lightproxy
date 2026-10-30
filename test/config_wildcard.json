@@ -1,0 +1,40 @@
+{
+  "listen": ":18680",
+  "admin": {
+    "listen": "127.0.0.1:18681",
+    "user": "admin",
+    "pass": ""
+  },
+  "tls": {
+    "enable": false
+  },
+  "proxy": [],
+  "ddns": {
+    "enable": true,
+    "provider": "aliyun",
+    "accessKeyId": "testid",
+    "accessKeySecret": "testsecret",
+    "records": [
+      {
+        "domain": "*.example.com",
+        "rr": "@",
+        "type": "A"
+      },
+      {
+        "domain": "example.com",
+        "rr": "@",
+        "type": "A"
+      }
+    ],
+    "interval": 600,
+    "ipMode": "api",
+    "ipSources": [
+      "http://127.0.0.1:18109/ip"
+    ],
+    "ttl": 600
+  },
+  "runtime": {
+    "memLimitMB": 32,
+    "accessLog": true
+  }
+}

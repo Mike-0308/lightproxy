@@ -1,0 +1,18 @@
+{
+  "listen": ":18580",
+  "admin": { "listen": "127.0.0.1:18581", "user": "admin", "pass": "test1234" },
+  "tls": { "enable": false },
+  "proxy": [],
+  "ddns": {
+    "enable": true,
+    "provider": "aliyun",
+    "accessKeyId": "testid",
+    "accessKeySecret": "testsecret",
+    "records": [{ "domain": "example.com", "rr": "home", "type": "A" }],
+    "interval": 600,
+    "ipMode": "api",
+    "ipSources": ["http://127.0.0.1:18109/ip"],
+    "ttl": 600
+  },
+  "runtime": { "memLimitMB": 32, "accessLog": true }
+}
