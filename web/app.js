@@ -767,6 +767,49 @@ async function waitBack(tries) {
   }
 }
 
+/* 配置导出 / 导入 */
+$('#btnExportCfg').addEventListener('click', async () => {
+  const err = $('#setErr'), ok = $('#setOk');
+  hide(err); hide(ok);
+  try {
+    const r = await fetch('/api/config/export');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="?([^";]+)"?/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (m && m[1]) || 'lightproxy-config.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    ok.textContent = '配置已导出（含 AccessKey，请妥善保管）';
+    ok.classList.remove('hidden');
+  } catch (e) { showErr(err, '导出失败: ' + e.message); }
+});
+
+$('#btnImportCfg').addEventListener('click', () => $('#importFile').click());
+
+$('#importFile').addEventListener('change', async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = '';
+  if (!file) return;
+  const err = $('#setErr'), ok = $('#setOk');
+  hide(err); hide(ok);
+  let text;
+  try { text = await file.text(); } catch (e) { showErr(err, '读取文件失败: ' + e.message); return; }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) { showErr(err, '不是合法的 JSON 文件'); return; }
+  if (!confirm('导入将覆盖当前全部配置（面板密码、规则、密钥都会被替换），且立即生效。确定继续？')) return;
+  try {
+    await api('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
+    ok.textContent = '配置已导入并生效，正在刷新页面…';
+    ok.classList.remove('hidden');
+    setTimeout(() => location.reload(), 1200);
+  } catch (e) { showErr(err, '导入失败: ' + e.message); }
+});
+
 $('#btnRefreshLogs').addEventListener('click', loadLogs);
 
 /* ---------- 轮询 ---------- */

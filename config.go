@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -203,22 +204,36 @@ func SaveConfig(path string, c *Config) error {
 	return nil
 }
 
+// checkListen 校验监听地址：格式形如 host:port，且端口必须是 1-65535 的数字。
+// net.SplitHostPort 本身不验证端口是否为数字，":bad host" 也会被它接受。
+func checkListen(addr, what string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s无效（应形如 %s）: %s", what, what, addr)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("%s的端口必须是 1-65535 的数字: %s", what, addr)
+	}
+	return nil
+}
+
 // Normalize 补默认值并校验，返回第一条错误。
 func (c *Config) Normalize() error {
 	c.Listen = strings.TrimSpace(c.Listen)
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
-	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
-		return fmt.Errorf("反代监听地址无效（应形如 :8080）: %s", c.Listen)
+	if err := checkListen(c.Listen, "反代监听地址（应形如 :8080）"); err != nil {
+		return err
 	}
 
 	c.Admin.Listen = strings.TrimSpace(c.Admin.Listen)
 	if c.Admin.Listen == "" {
 		c.Admin.Listen = "0.0.0.0:8081"
 	}
-	if _, _, err := net.SplitHostPort(c.Admin.Listen); err != nil {
-		return fmt.Errorf("管理面板监听地址无效（应形如 0.0.0.0:8081）: %s", c.Admin.Listen)
+	if err := checkListen(c.Admin.Listen, "管理面板监听地址（应形如 0.0.0.0:8081）"); err != nil {
+		return err
 	}
 	if c.Admin.User == "" {
 		c.Admin.User = "admin"
@@ -233,8 +248,8 @@ func (c *Config) Normalize() error {
 		}
 	}
 	if c.TLS.HTTPListen != "" {
-		if _, _, err := net.SplitHostPort(c.TLS.HTTPListen); err != nil {
-			return fmt.Errorf("HTTP 跳转监听地址无效: %s", c.TLS.HTTPListen)
+		if err := checkListen(c.TLS.HTTPListen, "HTTP 跳转监听地址"); err != nil {
+			return err
 		}
 	}
 	// 勾了「HTTP 自动跳转」但没填监听地址时，默认接管 80

@@ -206,7 +206,7 @@ verify() {
   echo "== 开机自启挂钩"
   if [ -f /etc/init.d/lightproxy ] && [ -x /etc/rc.common ]; then
     grep -q lightproxy /etc/rc.d 2>/dev/null && D="已启用" || D="已写入（enable 状态未知）"
-    echo "  init.d(procd): $D"
+    echo "  init.d(procd): \$D"
   else
     echo "  init.d(procd): 无"
   fi
@@ -280,7 +280,7 @@ BOOTLOG="$PREFIX/boot.log"
     i=\$((\$i+1))
   done
   echo "\$(date '+%F %T') 重试 5 分钟仍失败，放弃" >>"\$BOOTLOG"
-) </dev/null >>"$BOOTLOG" 2>&1 &
+) </dev/null >>"\$BOOTLOG" 2>&1 &
 exit 0
 STARTEOF
 chmod +x "$PREFIX/startup.sh"

@@ -302,6 +302,17 @@
       <p class="tip">开启后请确认已有一条反代规则指向 <code>http://127.0.0.1:8081</code>，否则只能靠 SSH 隧道进面板救急。</p>
     </div>
 
+    <div class="card">
+      <div class="card-hd"><h2>配置备份</h2></div>
+      <p class="tip">导出全部设置（含反向代理、DDNS、端口转发、证书与访问控制）为 JSON 文件，用于备份或迁移到别的路由器。
+        <b>注意：文件里包含阿里云 AccessKey，请妥善保管。</b>导入会立即生效并覆盖当前配置，导入前会先校验，不合法的文件不会生效。</p>
+      <div class="actions">
+        <button class="ghost" id="btnExportCfg">导出配置</button>
+        <button class="ghost" id="btnImportCfg">导入配置</button>
+        <input type="file" id="importFile" accept=".json,application/json" class="hidden">
+      </div>
+    </div>
+
     <div class="actions">
       <button class="primary" id="btnSaveSettings">保存设置</button>
       <button class="ghost" id="btnReloadCert">重载证书</button>

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -27,7 +28,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.2.0"
+var version = "1.2.1"
 
 type App struct {
 	mu      sync.Mutex
@@ -411,6 +412,8 @@ func (a *App) adminHandler() http.Handler {
 	mux.HandleFunc("/api/logout", a.handleLogout)
 	mux.HandleFunc("/api/status", a.authed(a.handleStatus))
 	mux.HandleFunc("/api/config", a.authed(a.handleConfig))
+	mux.HandleFunc("/api/config/export", a.authed(a.handleConfigExport))
+	mux.HandleFunc("/api/config/import", a.authed(a.handleConfigImport))
 	mux.HandleFunc("/api/ddns/run", a.authed(a.handleDDNSRun))
 	mux.HandleFunc("/api/ddns/test", a.authed(a.handleDDNSTest))
 	mux.HandleFunc("/api/ddns/ip", a.authed(a.handleDDNSIP))
@@ -631,6 +634,57 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 	}
+}
+
+// handleConfigExport 下载当前配置（JSON 附件）。文件含 AccessKey 等敏感信息，
+// 响应头里提醒，前端 UI 也会说明。
+func (a *App) handleConfigExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	a.mu.Lock()
+	cfg := a.cfg
+	a.mu.Unlock()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	name := fmt.Sprintf("lightproxy-config-%s.json", time.Now().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Write(data)
+}
+
+// handleConfigImport 接受导出的配置文件并热应用。
+// 兼容两种载荷：纯配置 JSON，或 {"config": {...}} 包裹（即面板 /api/config 的原样回传）。
+func (a *App) handleConfigImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&raw); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "配置文件格式错误: " + err.Error()})
+		return
+	}
+	body, ok := raw["config"]
+	if !ok {
+		body, _ = json.Marshal(raw)
+	}
+	var next Config
+	if err := json.Unmarshal(body, &next); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "配置内容无法解析: " + err.Error()})
+		return
+	}
+	if err := a.ApplyConfig(&next, true); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "配置校验失败: " + err.Error()})
+		return
+	}
+	a.logs.Infof("已导入配置文件并热应用")
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (a *App) handleDDNSRun(w http.ResponseWriter, r *http.Request) {
