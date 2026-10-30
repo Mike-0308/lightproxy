@@ -100,9 +100,12 @@ function fillForms() {
   $('#s-mem').value = rt.memLimitMB || 32;
   $('#s-access').checked = rt.accessLog !== false;
   $('#s-tls').checked = !!t.enable;
-  $('#s-cert').value = t.cert || '';
-  $('#s-key').value = t.key || '';
-  $('#s-certdir').value = t.certDir || '';
+  // 证书路径由后端自动推导，只有手填过、且和自动目录不同才回显
+  const autoDir = (state.status && state.status.certsDirAuto) || '';
+  $('#s-certdir').value = (t.certDir && t.certDir !== autoDir) ? t.certDir : '';
+  const dirText = (state.status && state.status.certsDir) || autoDir || '安装目录/certs';
+  $('#s-certsdir').textContent = dirText;
+  if ($('#a-certsdir')) $('#a-certsdir').textContent = dirText;
   $('#s-httplisten').value = t.httpListen || '';
   $('#s-redirect').checked = !!t.redirect;
   $('#s-pubport').value = t.publicPort || 443;
@@ -119,7 +122,6 @@ function fillForms() {
   $('#a-email').value = ac.email || '';
   $('#a-ca').value = ac.ca || 'letsencrypt';
   $('#a-domains').value = (ac.domains || []).join('\n');
-  $('#a-certdir').value = ac.certDir || '';
   $('#a-keytype').value = ac.keyType || 'ec256';
   $('#a-renewdays').value = ac.renewDays || 30;
   $('#a-ak').value = ac.accessKeyId || '';
@@ -423,20 +425,18 @@ function collectConfig() {
   syncRecords(c);
 
   // 监听 / 面板 / 运行时
-  c.listen = $('#s-listen').value.trim() || ':18080';
+  c.listen = $('#s-listen').value.trim() || ':16666';
   c.admin = c.admin || {};
-  c.admin.listen = $('#s-admin').value.trim() || '0.0.0.0:8081';
+  c.admin.listen = $('#s-admin').value.trim() || '0.0.0.0:18080';
   c.admin.user = $('#s-user').value.trim() || 'admin';
   c.admin.pass = $('#s-pass').value;
   c.runtime = c.runtime || {};
   c.runtime.memLimitMB = +$('#s-mem').value || 32;
   c.runtime.accessLog = $('#s-access').checked;
 
-  // TLS
+  // TLS：证书路径由后端自动推导，不再由界面填写
   c.tls = c.tls || {};
   c.tls.enable = $('#s-tls').checked;
-  c.tls.cert = $('#s-cert').value.trim();
-  c.tls.key = $('#s-key').value.trim();
   c.tls.certDir = $('#s-certdir').value.trim();
   c.tls.httpListen = $('#s-httplisten').value.trim();
   c.tls.redirect = $('#s-redirect').checked;
@@ -461,7 +461,6 @@ function collectConfig() {
   c.acme.email = $('#a-email').value.trim();
   c.acme.ca = $('#a-ca').value;
   c.acme.domains = $('#a-domains').value.split(/[\n,，\s]+/).map(s => s.trim()).filter(Boolean);
-  c.acme.certDir = $('#a-certdir').value.trim();
   c.acme.keyType = $('#a-keytype').value;
   c.acme.renewDays = +$('#a-renewdays').value || 30;
   c.acme.accessKeyId = $('#a-ak').value.trim();
@@ -765,7 +764,7 @@ async function waitBack(tries) {
   }
 }
 
-/* 配置导出 / 导入 */
+/* 配置导出 / 导入（zip 备份包，含证书） */
 $('#btnExportCfg').addEventListener('click', async () => {
   const err = $('#setErr'), ok = $('#setOk');
   hide(err); hide(ok);
@@ -777,12 +776,12 @@ $('#btnExportCfg').addEventListener('click', async () => {
     const m = cd.match(/filename="?([^";]+)"?/);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = (m && m[1]) || 'lightproxy-config.json';
+    a.download = (m && m[1]) || 'lightproxy-backup.zip';
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    ok.textContent = '配置已导出（含 AccessKey，请妥善保管）';
+    ok.textContent = '备份已导出（含配置、证书与私钥，请妥善保管）';
     ok.classList.remove('hidden');
   } catch (e) { showErr(err, '导出失败: ' + e.message); }
 });
@@ -795,16 +794,40 @@ $('#importFile').addEventListener('change', async (ev) => {
   if (!file) return;
   const err = $('#setErr'), ok = $('#setOk');
   hide(err); hide(ok);
-  let text;
-  try { text = await file.text(); } catch (e) { showErr(err, '读取文件失败: ' + e.message); return; }
-  let parsed;
-  try { parsed = JSON.parse(text); } catch (e) { showErr(err, '不是合法的 JSON 文件'); return; }
-  if (!confirm('导入将覆盖当前全部配置（面板密码、规则、密钥都会被替换），且立即生效。确定继续？')) return;
+  let buf;
+  try { buf = await file.arrayBuffer(); } catch (e) { showErr(err, '读取文件失败: ' + e.message); return; }
+  const bytes = new Uint8Array(buf);
+  const isZip = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+
+  if (!isZip) {
+    // 兼容旧版导出的纯 JSON
+    let parsed;
+    try { parsed = JSON.parse(new TextDecoder().decode(bytes)); }
+    catch (e) { showErr(err, '既不是 zip 备份包，也不是合法的 JSON 文件'); return; }
+    if (!confirm('导入将覆盖当前全部配置（面板密码、规则、密钥都会被替换），且立即生效。确定继续？')) return;
+    try {
+      await api('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
+      ok.textContent = '配置已导入并生效，正在刷新页面…';
+      ok.classList.remove('hidden');
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) { showErr(err, '导入失败: ' + e.message); }
+    return;
+  }
+
+  if (!confirm('导入备份包将覆盖当前全部配置与证书，且立即生效。确定继续？')) return;
   try {
-    await api('/api/config/import', { method: 'POST', body: JSON.stringify(parsed) });
-    ok.textContent = '配置已导入并生效，正在刷新页面…';
+    const r = await fetch('/api/config/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/zip' },
+      body: buf,
+    });
+    if (r.status === 401) { location.reload(); return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    const n = (d.certs || []).length;
+    ok.textContent = '备份已恢复' + (n ? '（含 ' + n + ' 个证书文件）' : '') + '，正在刷新页面…';
     ok.classList.remove('hidden');
-    setTimeout(() => location.reload(), 1200);
+    setTimeout(() => location.reload(), 1400);
   } catch (e) { showErr(err, '导入失败: ' + e.message); }
 });
 

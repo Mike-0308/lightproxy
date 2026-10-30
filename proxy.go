@@ -290,7 +290,10 @@ func (m *certManager) reload() error {
 	if m.dir != "" {
 		entries, err := os.ReadDir(m.dir)
 		if err != nil {
-			m.logs.Warnf("证书目录不可读: %v", err)
+			// 证书目录还没建（还没签发过）是正常状态，不当错误提示
+			if !os.IsNotExist(err) {
+				m.logs.Warnf("证书目录不可读: %v", err)
+			}
 		} else {
 			for _, e := range entries {
 				if e.IsDir() {

@@ -156,7 +156,8 @@
         <h2>自动证书</h2>
         <label class="switch"><input type="checkbox" id="a-enable"><span></span>启用</label>
       </div>
-      <p class="tip">走 DNS-01 验证：用阿里云解析自动添加 TXT 记录，<b>不占用 80 端口</b>，不和反向代理抢路径，还支持泛域名。签发后写入证书目录并热加载，剩余天数低于阈值时自动续期。</p>
+      <p class="tip">走 DNS-01 验证：用阿里云解析自动添加 TXT 记录，<b>不占用 80 端口</b>，不和反向代理抢路径，还支持泛域名。
+        证书自动保存在 <code id="a-certsdir">安装目录/certs</code>，签发后直接生效，不用填目录、不用上传文件。剩余天数低于阈值时自动续期。</p>
       <div class="form grid2">
         <label class="row"><span>联系邮箱</span><input id="a-email" placeholder="you@example.com"></label>
         <label class="row"><span>证书颁发机构</span>
@@ -167,7 +168,6 @@
           </select>
         </label>
         <label class="row span2"><span>域名（每行一个）</span><textarea id="a-domains" rows="2" placeholder="nas.example.com&#10;*.pan.example.com"></textarea></label>
-        <label class="row"><span>证书目录</span><input id="a-certdir" placeholder="/data/certs"></label>
         <label class="row"><span>私钥类型</span>
           <select id="a-keytype">
             <option value="ec256">ECDSA P-256（推荐，路由器上更快）</option>
@@ -257,8 +257,8 @@
     <div class="card">
       <div class="card-hd"><h2>监听与面板</h2></div>
       <div class="form grid2">
-        <label class="row"><span>反代监听地址</span><input id="s-listen" placeholder=":18080"></label>
-        <label class="row"><span>面板监听地址</span><input id="s-admin" placeholder="0.0.0.0:8081"></label>
+        <label class="row"><span>反代监听地址</span><input id="s-listen" placeholder=":16666"></label>
+        <label class="row"><span>面板监听地址</span><input id="s-admin" placeholder="0.0.0.0:18080"></label>
         <label class="row"><span>面板账号</span><input id="s-user" placeholder="admin"></label>
         <label class="row"><span>面板密码</span><input id="s-pass" type="text" placeholder="留空则不需要登录"></label>
         <label class="row"><span>内存上限（MB）</span><input id="s-mem" type="number" min="16" step="8"></label>
@@ -270,12 +270,11 @@
 
     <div class="card">
       <div class="card-hd"><h2>HTTPS</h2><label class="switch"><input type="checkbox" id="s-tls"><span></span>启用</label></div>
-      <p class="tip">支持单张默认证书，或一个目录（按 SNI 自动匹配，文件名用域名，如 <code>nas.example.com.crt</code> + <code>.key</code>）。更换证书后按「重载证书」即可，无需重启。</p>
+      <p class="tip">证书由「证书」页自动申请并保存到 <code id="s-certsdir">安装目录/certs</code>，
+        这里<b>不用填任何证书路径</b>——开启后自动加载、自动按域名（SNI）匹配，签发或续期后自动热加载。</p>
       <div class="form grid2">
-        <label class="row"><span>证书文件</span><input id="s-cert" placeholder="/data/certs/fullchain.pem"></label>
-        <label class="row"><span>私钥文件</span><input id="s-key" placeholder="/data/certs/privkey.pem"></label>
-        <label class="row"><span>证书目录（可选）</span><input id="s-certdir" placeholder="/data/certs"></label>
         <label class="row"><span>HTTPS 公网端口</span><input id="s-pubport" type="number" min="1" max="65535" placeholder="443"></label>
+        <label class="row"><span>证书目录（可选）</span><input id="s-certdir" placeholder="留空即用上面的自动目录"></label>
       </div>
       <div class="form">
         <label class="row checks-inline"><span>HTTP 跳转</span>
@@ -297,17 +296,18 @@
         </label>
         <label class="row"><span>额外允许的域名</span><input id="s-extrahosts" placeholder="可留空，多个用逗号分隔"></label>
       </div>
-      <p class="tip">面板端口（8081）不会写进防火墙放行名单，外网本来就够不着；这项开关是应用层的第二道保险。</p>
+      <p class="tip">面板端口（18080）不会写进防火墙放行名单，外网本来就够不着；这项开关是应用层的第二道保险。</p>
     </div>
 
     <div class="card">
       <div class="card-hd"><h2>配置备份</h2></div>
-      <p class="tip">导出全部设置（含反向代理、DDNS、端口转发、证书与访问控制）为 JSON 文件，用于备份或迁移到别的路由器。
-        <b>注意：文件里包含阿里云 AccessKey，请妥善保管。</b>导入会立即生效并覆盖当前配置，导入前会先校验，不合法的文件不会生效。</p>
+      <p class="tip">导出为一个 <code>.zip</code> 压缩包，里面包含全部设置（反向代理、DDNS、端口转发、访问控制）<b>以及证书文件和私钥</b>，
+        换机器或重装后直接导入即可使用，不需要重新签发证书。
+        <b>注意：包里包含阿里云 AccessKey 与证书私钥，请妥善保管。</b>导入会立即生效并覆盖当前配置，导入前会先校验，不合法的包不会生效。</p>
       <div class="actions">
-        <button class="ghost" id="btnExportCfg">导出配置</button>
-        <button class="ghost" id="btnImportCfg">导入配置</button>
-        <input type="file" id="importFile" accept=".json,application/json" class="hidden">
+        <button class="ghost" id="btnExportCfg">导出备份（含证书）</button>
+        <button class="ghost" id="btnImportCfg">导入备份</button>
+        <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" class="hidden">
       </div>
     </div>
 

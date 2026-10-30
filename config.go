@@ -24,6 +24,13 @@ type Config struct {
 	ACME     ACMEConfig     `json:"acme"`
 	Forward  ForwardConfig  `json:"forward"`
 	Runtime  RuntimeConfig  `json:"runtime"`
+
+	// baseDir 是配置文件所在目录（不序列化），用来推导默认证书目录：
+	// 装到 /data/lightproxy 时，证书自动落在 /data/lightproxy/certs。
+	baseDir string
+	// certDirAuto 表示证书目录是推导出来的（用户没手填），
+	// 落盘和导出时不写死路径，换设备/换安装目录后自动跟过去。
+	certDirAuto bool
 }
 
 type AdminConfig struct {
@@ -135,9 +142,11 @@ type ForwardRule struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		Listen: ":18080",
+		// 默认避开 8080/8081：小米等路由器的管理后台（LuCI）在 8080，
+		// 抢了端口会导致路由器 Web 端打不开。面板也换到 18080，避免和常见服务打架。
+		Listen: ":16666",
 		Admin: AdminConfig{
-			Listen: "0.0.0.0:8081",
+			Listen: "0.0.0.0:18080",
 			User:   "admin",
 			Pass:   "",
 		},
@@ -156,6 +165,33 @@ func DefaultConfig() *Config {
 	}
 }
 
+// setBaseFrom 记录配置文件所在目录，供 deriveCertDir 推导默认证书目录。
+func (c *Config) setBaseFrom(cfgPath string) {
+	dir := filepath.Dir(cfgPath)
+	if dir == "" {
+		dir = "."
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	c.baseDir = dir
+}
+
+// deriveCertDir 返回默认证书目录：配置目录下的 certs。
+// 装到 /data/lightproxy 就是 /data/lightproxy/certs，
+// 用户不用再手填路径，申请的证书和 HTTPS 加载用的是同一个目录。
+func (c *Config) deriveCertDir() string {
+	base := c.baseDir
+	if base == "" {
+		if abs, err := filepath.Abs("."); err == nil {
+			base = abs
+		} else {
+			base = "."
+		}
+	}
+	return filepath.Join(base, "certs")
+}
+
 // LoadConfig 读取配置；文件不存在时生成默认配置并返回 firstRun=true。
 func LoadConfig(path string) (cfg *Config, firstRun bool, err error) {
 	data, rerr := os.ReadFile(path)
@@ -171,6 +207,7 @@ func LoadConfig(path string) (cfg *Config, firstRun bool, err error) {
 		return c, true, nil
 	}
 	c := DefaultConfig()
+	c.setBaseFrom(path)
 	if err := json.Unmarshal(data, c); err != nil {
 		return nil, false, fmt.Errorf("配置文件不是合法 JSON: %w", err)
 	}
@@ -180,12 +217,27 @@ func LoadConfig(path string) (cfg *Config, firstRun bool, err error) {
 	return c, false, nil
 }
 
+// forPersist 返回用于落盘/导出的副本：自动推导出来的证书目录不写死，
+// 换设备或换安装目录后会按新位置自动重建。
+func (c *Config) forPersist() *Config {
+	if !c.certDirAuto {
+		return c
+	}
+	cp := *c
+	cp.TLS.CertDir = ""
+	if cp.ACME.CertDir == c.deriveCertDir() {
+		cp.ACME.CertDir = ""
+	}
+	return &cp
+}
+
 // SaveConfig 原子写入，权限 0600（含 AccessKey 等敏感信息）。
 func SaveConfig(path string, c *Config) error {
+	c.setBaseFrom(path)
 	if err := c.Normalize(); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(c.forPersist(), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -224,29 +276,35 @@ func checkListen(addr, what string) error {
 func (c *Config) Normalize() error {
 	c.Listen = strings.TrimSpace(c.Listen)
 	if c.Listen == "" {
-		// 默认避开 8080：小米等路由器的管理后台（LuCI）用它，
-		// 抢了端口会导致路由器 Web 端打不开。
-		c.Listen = ":18080"
+		c.Listen = ":16666"
 	}
-	if err := checkListen(c.Listen, "反代监听地址（应形如 :18080）"); err != nil {
+	if err := checkListen(c.Listen, "反代监听地址（应形如 :16666）"); err != nil {
 		return err
 	}
 
 	c.Admin.Listen = strings.TrimSpace(c.Admin.Listen)
 	if c.Admin.Listen == "" {
-		c.Admin.Listen = "0.0.0.0:8081"
+		c.Admin.Listen = "0.0.0.0:18080"
 	}
-	if err := checkListen(c.Admin.Listen, "管理面板监听地址（应形如 0.0.0.0:8081）"); err != nil {
+	if err := checkListen(c.Admin.Listen, "管理面板监听地址（应形如 0.0.0.0:18080）"); err != nil {
 		return err
 	}
 	if c.Admin.User == "" {
 		c.Admin.User = "admin"
 	}
 
+	// 证书目录留空就用配置目录下的 certs，申请证书与 HTTPS 加载共用这一个目录，
+	// 用户不必再手填路径。
+	c.TLS.CertDir = strings.TrimSpace(c.TLS.CertDir)
+	if c.TLS.CertDir == "" {
+		c.TLS.CertDir = c.deriveCertDir()
+		c.certDirAuto = true
+	} else {
+		c.certDirAuto = false
+	}
+	c.TLS.Cert = strings.TrimSpace(c.TLS.Cert)
+	c.TLS.Key = strings.TrimSpace(c.TLS.Key)
 	if c.TLS.Enable {
-		if c.TLS.Cert == "" && c.TLS.CertDir == "" {
-			return fmt.Errorf("启用 HTTPS 时至少需要填写证书文件或证书目录")
-		}
 		if c.TLS.Cert != "" && c.TLS.Key == "" {
 			return fmt.Errorf("已填写证书文件，但缺少私钥文件")
 		}
@@ -411,6 +469,7 @@ func (c *Config) normalizeACME() error {
 	if ac.RenewDays > 60 {
 		ac.RenewDays = 60
 	}
+	// 证书目录留空就跟着 HTTPS 用同一个自动目录，不用手填
 	ac.CertDir = strings.TrimSpace(ac.CertDir)
 	if ac.CertDir == "" {
 		ac.CertDir = c.TLS.CertDir
@@ -444,9 +503,6 @@ func (c *Config) normalizeACME() error {
 	// 否则以后改 DDNS 的密钥，自动证书这边会一直用旧的。
 	if strings.TrimSpace(ac.AccessKey) == "" && strings.TrimSpace(c.DDNS.AccessKey) == "" {
 		return fmt.Errorf("启用自动证书需要阿里云 AccessKey（可在 DDNS 页填写后自动复用）")
-	}
-	if ac.CertDir == "" {
-		return fmt.Errorf("启用自动证书需要指定证书目录")
 	}
 	if ac.Email == "" {
 		return fmt.Errorf("启用自动证书需要填写联系邮箱（CA 用于到期提醒）")

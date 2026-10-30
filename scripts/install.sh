@@ -2,14 +2,14 @@
 # 轻代理 lightproxy 安装脚本（在路由器上执行，busybox sh 兼容）
 #
 #   本地安装：  sh install.sh /tmp/lightproxy-armv7
-#   一行安装：  curl -fsSL https://raw.githubusercontent.com/OWNER/lightproxy/main/scripts/install.sh | sh
+#   一行安装：  curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
 #              （自动识别架构并从 GitHub Releases 下载对应二进制）
-#   一行卸载：  curl -fsSL https://raw.githubusercontent.com/OWNER/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
+#   一行卸载：  curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
 #   本地卸载：  sh install.sh --uninstall
 set -u
 
 # 默认仓库；一行安装时从这里下载二进制，可用环境变量 LP_REPO 覆盖（owner/repo）
-DEFAULT_REPO="OWNER/lightproxy"
+DEFAULT_REPO="Mike-0308/lightproxy"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
@@ -55,10 +55,6 @@ fi
 # ---------------------------------------------------------------- 一行安装：自动下载
 if [ -z "$BIN_SRC" ]; then
   REPO="${LP_REPO:-$DEFAULT_REPO}"
-  case "$REPO" in
-    OWNER/*|*OWNER*) ;;
-    *) : ;;
-  esac
   ARCH=$(uname -m)
   case "$ARCH" in
     armv7l|armv7|armv6l|arm) FILE="lightproxy-linux-armv7" ;;
@@ -362,7 +358,8 @@ say " 配置文件: $CFG"
 say " 开机自启（多重保险，全部幂等）:"
 printf '%b\n' "$HOOKS"
 say ""
-say " 管理面板: http://$IPADDR:8081/"
+say " 管理面板: http://$IPADDR:18080/"
+say " 反代入口: $IPADDR:16666（用域名访问时走 443/HTTPS）"
 if [ "$FIRST_RUN" = "1" ]; then
   say " 登录密码: 见上面 -check 输出里的「管理面板账号」一行"
 fi

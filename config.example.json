@@ -1,7 +1,7 @@
 {
-  "listen": ":18080",
+  "listen": ":16666",
   "admin": {
-    "listen": "0.0.0.0:8081",
+    "listen": "0.0.0.0:18080",
     "user": "admin",
     "pass": "改成你自己的密码"
   },
@@ -9,7 +9,7 @@
     "enable": true,
     "cert": "",
     "key": "",
-    "certDir": "/data/lightproxy/certs",
+    "certDir": "",
     "httpListen": ":80",
     "redirect": true,
     "publicPort": 443
@@ -37,7 +37,7 @@
       "name": "管理面板（藏到域名后面）",
       "hosts": ["panel.example.com"],
       "path": "/",
-      "target": "http://127.0.0.1:8081"
+      "target": "http://127.0.0.1:18080"
     },
     {
       "name": "同一域名下的接口",
@@ -77,7 +77,7 @@
     "email": "you@example.com",
     "ca": "letsencrypt",
     "domains": ["nas.example.com", "*.pan.example.com"],
-    "certDir": "/data/lightproxy/certs",
+    "certDir": "",
     "keyType": "ec256",
     "renewDays": 30
   },

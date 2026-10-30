@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -28,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.3.1"
+var version = "1.4.0"
 
 type App struct {
 	mu      sync.Mutex
@@ -47,6 +49,7 @@ type App struct {
 
 	sessions    *sessionStore
 	needRestart bool
+	tlsActive   bool // 当前进程是否真的以 HTTPS 在跑（没有证书时先退回 HTTP）
 }
 
 func acmeKeyPath(cfgPath string) string {
@@ -100,7 +103,17 @@ func (a *App) reloadCerts() error {
 	if cm == nil {
 		return errors.New("TLS 未启用，证书已写入磁盘但未加载")
 	}
-	return cm.reload()
+	if err := cm.reload(); err != nil {
+		return err
+	}
+	if !a.tlsActive {
+		// 启动时没证书只能跑 HTTP，现在证书有了，重启一次就切到 HTTPS
+		a.mu.Lock()
+		a.needRestart = true
+		a.mu.Unlock()
+		a.logs.Warnf("证书已就绪，重启服务后自动启用 HTTPS")
+	}
+	return nil
 }
 
 func (a *App) Config() *Config {
@@ -111,6 +124,7 @@ func (a *App) Config() *Config {
 
 // ApplyConfig 校验 -> 落盘 -> 热加载（反代规则与 DDNS 立即生效）。
 func (a *App) ApplyConfig(next *Config, persist bool) error {
+	next.setBaseFrom(a.cfgPath)
 	if err := next.Normalize(); err != nil {
 		return err
 	}
@@ -188,10 +202,18 @@ func (a *App) Start() error {
 	servers = append(servers, srv)
 
 	if cfg.TLS.Enable {
-		a.certs = newCertManager(cfg.TLS, a.logs)
-		if err := a.certs.reload(); err != nil {
-			return err
+		cm := newCertManager(cfg.TLS, a.logs)
+		a.certs = cm
+		if err := cm.reload(); err != nil {
+			// 证书还没签发（刚打开 HTTPS 就来申请）时不能把整个服务卡死：
+			// 先以 HTTP 跑着，证书就绪后重启一次即可切到 HTTPS。
+			a.logs.Warnf("HTTPS 已开启但暂时没有可用证书（%v），先以 HTTP 运行", err)
+		} else {
+			a.tlsActive = true
 		}
+	}
+
+	if a.tlsActive {
 		srv.TLSConfig = &tls.Config{
 			GetCertificate: a.certs.GetCertificate,
 			MinVersion:     tls.VersionTLS12,
@@ -571,6 +593,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	a.mu.Lock()
 	needRestart := a.needRestart
+	tlsActive := a.tlsActive
 	a.mu.Unlock()
 
 	writeJSON(w, 200, map[string]any{
@@ -580,6 +603,9 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"listen":      cfg.Listen,
 		"adminListen": cfg.Admin.Listen,
 		"tls":         cfg.TLS.Enable,
+		"tlsActive":   tlsActive,
+		"certsDir":    cfg.TLS.CertDir,
+		"certsDirAuto": cfg.deriveCertDir(),
 		"tlsInfo":     certInfo,
 		"rules":       rules,
 		"security": map[string]any{
@@ -646,8 +672,8 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleConfigExport 下载当前配置（JSON 附件）。文件含 AccessKey 等敏感信息，
-// 响应头里提醒，前端 UI 也会说明。
+// handleConfigExport 打包当前配置与证书为 zip 下载。
+// 文件含 AccessKey 与证书私钥，响应头里提醒，前端 UI 也会说明。
 func (a *App) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
@@ -656,36 +682,63 @@ func (a *App) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	cfg := a.cfg
 	a.mu.Unlock()
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := buildBackupZip(cfg)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		writeJSON(w, 500, map[string]any{"error": "打包失败: " + err.Error()})
 		return
 	}
-	name := fmt.Sprintf("lightproxy-config-%s.json", time.Now().Format("20060102-150405"))
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	name := fmt.Sprintf("lightproxy-backup-%s.zip", time.Now().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Write(data)
 }
 
-// handleConfigImport 接受导出的配置文件并热应用。
-// 兼容两种载荷：纯配置 JSON，或 {"config": {...}} 包裹（即面板 /api/config 的原样回传）。
+// handleConfigImport 接受备份包（zip，含证书）或旧版纯 JSON，校验后热应用。
+// 配置先落盘生效，再写证书文件，最后热加载——坏包不会把现有证书覆盖掉。
 func (a *App) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
-	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&raw); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "配置文件格式错误: " + err.Error()})
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 12<<20))
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": "读取上传内容失败: " + err.Error()})
 		return
 	}
-	body, ok := raw["config"]
-	if !ok {
-		body, _ = json.Marshal(raw)
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		writeJSON(w, 400, map[string]any{"error": "上传内容为空"})
+		return
 	}
+
+	var cfgJSON []byte
+	var certs map[string][]byte
+	var accountKey []byte
+
+	if len(raw) > 4 && raw[0] == 'P' && raw[1] == 'K' {
+		bc, zerr := readBackupZip(raw)
+		if zerr != nil {
+			writeJSON(w, 400, map[string]any{"error": "备份包无法解析: " + zerr.Error()})
+			return
+		}
+		cfgJSON, certs, accountKey = bc.ConfigJSON, bc.Certs, bc.AccountKey
+	} else {
+		// 兼容旧版导出的 JSON，以及 {"config": {...}} 包裹（面板 /api/config 的原样回传）
+		var probe map[string]json.RawMessage
+		if jerr := json.Unmarshal(raw, &probe); jerr != nil {
+			writeJSON(w, 400, map[string]any{"error": "既不是 zip 备份包，也不是合法的 JSON 配置"})
+			return
+		}
+		if body, ok := probe["config"]; ok {
+			cfgJSON = body
+		} else {
+			cfgJSON = raw
+		}
+	}
+
 	var next Config
-	if err := json.Unmarshal(body, &next); err != nil {
+	if err := json.Unmarshal(cfgJSON, &next); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "配置内容无法解析: " + err.Error()})
 		return
 	}
@@ -693,8 +746,25 @@ func (a *App) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "配置校验失败: " + err.Error()})
 		return
 	}
-	a.logs.Infof("已导入配置文件并热应用")
-	writeJSON(w, 200, map[string]any{"ok": true})
+
+	restored, cerr := restoreCerts(next.TLS.CertDir, certs)
+	if len(accountKey) > 0 {
+		if werr := os.WriteFile(acmeKeyPath(a.cfgPath), accountKey, 0o600); werr != nil {
+			a.logs.Warnf("ACME 账户密钥写入失败（不影响使用，下次签发会重新注册）: %v", werr)
+		}
+	}
+	if cerr != nil {
+		a.logs.Errorf("证书恢复失败: %v", cerr)
+		writeJSON(w, 500, map[string]any{"ok": false, "error": "配置已导入，但证书写入失败: " + cerr.Error()})
+		return
+	}
+	if len(restored) > 0 {
+		if rerr := a.reloadCerts(); rerr != nil {
+			a.logs.Warnf("证书已恢复但热加载失败（重启服务后生效）: %v", rerr)
+		}
+	}
+	a.logs.Infof("已导入配置备份，恢复证书 %d 个", len(restored))
+	writeJSON(w, 200, map[string]any{"ok": true, "certs": restored})
 }
 
 func (a *App) handleDDNSRun(w http.ResponseWriter, r *http.Request) {
