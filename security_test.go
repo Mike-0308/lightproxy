@@ -14,17 +14,22 @@ func newReq(host, remote string) *http.Request {
 }
 
 func TestProxyDeniesIPHost(t *testing.T) {
-	c := &Config{Security: SecurityConfig{RequireDomain: true, AllowLoopback: false}}
+	c := &Config{Security: SecurityConfig{RequireDomain: true}}
 	c.Proxy = []Rule{{Hosts: []string{"nas.example.com"}, Target: "http://192.168.1.10:5000"}}
 
 	cases := []struct {
 		name, host, remote string
 		deny               bool
 	}{
-		{"IPv4 直连", "203.0.113.7:8443", "198.51.100.9:1234", true},
-		{"IPv6 直连", "[2408:8274:1234::5]:8443", "198.51.100.9:1234", true},
-		{"域名访问", "nas.example.com:8443", "198.51.100.9:1234", false},
+		{"外网 IPv4 直连", "203.0.113.7:8443", "198.51.100.9:1234", true},
+		{"外网 IPv6 直连", "[2408:8274:1234::5]:8443", "2408:8274:abcd::9:1234", true},
+		{"外网域名访问", "nas.example.com:8443", "198.51.100.9:1234", false},
 		{"未知域名不在这里拦", "other.example.com", "198.51.100.9:1234", false},
+		// 内网放行：不管 Host 是内网 IP、公网 IP 还是 IPv6
+		{"内网用内网 IP 访问", "192.168.1.1:8443", "192.168.1.50:5000", false},
+		{"内网用公网 IP 作 Host", "203.0.113.7:8443", "192.168.1.50:5000", false},
+		{"内网 IPv6 来源", "[2408:8274:1234::5]:8443", "fe80::1234:5678", false},
+		{"内网 ULA 来源", "192.168.1.1:8443", "fd00::9:5000", false},
 	}
 	for _, c2 := range cases {
 		got := c.allowProxyRequest(newReq(c2.host, c2.remote)) != ""
@@ -34,39 +39,47 @@ func TestProxyDeniesIPHost(t *testing.T) {
 	}
 }
 
-func TestProxyLoopbackExemption(t *testing.T) {
-	c := &Config{Security: SecurityConfig{RequireDomain: true, AllowLoopback: true}}
+func TestProxyLoopbackAlwaysAllowed(t *testing.T) {
+	c := &Config{Security: SecurityConfig{RequireDomain: true}}
 	if reason := c.allowProxyRequest(newReq("127.0.0.1:8080", "127.0.0.1:50000")); reason != "" {
-		t.Errorf("回环豁免开启时不该拦，实际: %s", reason)
+		t.Errorf("本机回环应始终放行，实际: %s", reason)
 	}
-	c.Security.AllowLoopback = false
-	if reason := c.allowProxyRequest(newReq("127.0.0.1:8080", "127.0.0.1:50000")); reason == "" {
-		t.Error("回环豁免关闭时应当拦截")
+	if reason := c.allowProxyRequest(newReq("127.0.0.1:8080", "[::1]:50000")); reason != "" {
+		t.Errorf("IPv6 回环应始终放行，实际: %s", reason)
 	}
 }
 
 func TestAdminBehindProxy(t *testing.T) {
-	c := &Config{Security: SecurityConfig{RequireDomain: true, AllowLoopback: false}}
+	c := &Config{Security: SecurityConfig{RequireDomain: true}}
 	c.Proxy = []Rule{{Hosts: []string{"lp.example.com"}, Target: "http://127.0.0.1:8081"}}
 
-	// 反代转发过来：Host 被改写成 127.0.0.1:8081，原始域名在 X-Forwarded-Host
+	// 反代转发过来（来源是本机回环）：内网来源始终放行
 	r := newReq("127.0.0.1:8081", "127.0.0.1:50000")
 	r.Header.Set("X-Forwarded-Host", "lp.example.com")
 	if reason := c.allowAdminRequest(r); reason != "" {
-		t.Errorf("经反代域名访问面板应放行，实际: %s", reason)
+		t.Errorf("经反代访问面板应放行，实际: %s", reason)
 	}
 
-	// 用 IP 直连面板
+	// 内网 IP 直连面板：放行（内网没有安全风险）
 	r2 := newReq("192.168.1.1:8081", "192.168.1.50:50000")
-	if reason := c.allowAdminRequest(r2); reason == "" {
-		t.Error("用 IP 直连面板应被拦截")
+	if reason := c.allowAdminRequest(r2); reason != "" {
+		t.Errorf("内网 IP 直连面板应放行，实际: %s", reason)
 	}
 
-	// 冒充未知域名
-	r3 := newReq("127.0.0.1:8081", "127.0.0.1:50000")
-	r3.Header.Set("X-Forwarded-Host", "evil.example.org")
-	if reason := c.allowAdminRequest(r3); reason == "" {
-		t.Error("未知域名的反代请求应被拦截")
+	// 外网来源（假设面板端口被误开到外网）：
+	// 域名放行、未知域名和 IP 都拦
+	ext := "198.51.100.9:50000"
+	r4 := newReq("lp.example.com:8081", ext)
+	if reason := c.allowAdminRequest(r4); reason != "" {
+		t.Errorf("外网用已配置域名访问面板应放行，实际: %s", reason)
+	}
+	r5 := newReq("evil.example.org:8081", ext)
+	if reason := c.allowAdminRequest(r5); reason == "" {
+		t.Error("外网未知域名应被拦截")
+	}
+	r6 := newReq("192.168.1.1:8081", ext)
+	if reason := c.allowAdminRequest(r6); reason == "" {
+		t.Error("外网 IP 直连面板应被拦截")
 	}
 }
 

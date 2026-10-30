@@ -28,10 +28,14 @@
 - 需要以 root 运行（iptables 需要 CAP_NET_ADMIN）
 
 **只允许域名访问（安全）**
-- 打开后，用 IP（v4/v6）直连反代端口或面板端口一律 403，只认域名
+- 打开后，**外网**用 IP（v4/v6）直连反代端口或面板端口一律 403，只认域名
+- **内网（192.168.x / 10.x / 172.16-31.x / fe80:: / fd00::）和本机不受影响**，用 IP 直连照常用——内网没有安全风险
 - 面板藏在反代后面也能正常进（自动识别 `X-Forwarded-Host`）
-- 可保留回环豁免（127.0.0.1 / ::1 永远能进面板，防自锁）
-- 与路由器自带的 IPv6 防火墙配合：防火墙挡端口，这一层挡「IP:端口 直接打开」
+- 与路由器自带的 IPv6 防火墙配合：防火墙挡端口，这一层挡「外网 IP:端口 直接打开」
+
+**配置备份**
+- 设置页一键导出全部配置为 JSON 文件（含 AccessKey，注意保管）
+- 导入前先校验，不合法的文件不生效；导入即热应用，无需重启，适合迁移到别的设备
 
 **自动证书（ACME DNS-01）**
 - 支持 Let's Encrypt（含测试环境）与 ZeroSSL，CA 地址可自定义
@@ -87,8 +91,20 @@ ssh root@192.168.10.1 "sh /tmp/install.sh /data/lightproxy/bin/lightproxy"
 /data/lightproxy/ctl restart    # 改完配置后重启
 /data/lightproxy/ctl log        # 看日志
 /data/lightproxy/ctl verify     # 重启后服务没起来？看自启挂钩与启动日志
-sh /tmp/install.sh --uninstall  # 卸载
 ```
+
+**卸载**（停服务、清掉全部自启挂钩、删除程序与配置目录）：
+
+```bash
+# 已把 install.sh 传到路由器的情况
+sh /tmp/install.sh --uninstall
+
+# 没传过脚本时，一行远程卸载（OWNER 换成仓库作者）
+curl -fsSL https://raw.githubusercontent.com/OWNER/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
+```
+
+卸载会先摘掉开机挂钩再停进程（避免 procd 的 respawn 又拉起来），然后删除 `/data/lightproxy`。
+如需保留配置，卸载前先在面板「设置 → 配置备份 → 导出配置」下载一份。
 
 ## 开机自启
 
@@ -116,7 +132,7 @@ DDNS 只解决「域名指向你的 IP」，还要把端口放进来。推荐这
    开启本页后，反代监听端口（8443）和 HTTP 跳转端口（80，如果开了跳转）会一并写进 INPUT 放行；
    规则持久化、重启自动恢复。
 2. **路由器自带防火墙**（如 IPv6 防火墙）可以放心全开——只放行了上述端口。
-3. **面板 → 设置 → 访问控制**：打开「只允许域名访问」，杜绝别人拿 IP 扫到你的服务。
+3. **面板 → 设置 → 访问控制**：打开「只允许域名访问」，外网拿 IP 扫不到你的服务（内网不受影响）。
    同时建议加一条反代规则把面板藏在域名后面：`panel.example.com → http://127.0.0.1:8081`。
 4. 外网用 `https://nas.example.com` 访问；HTTP 会自动 301 到 HTTPS。
 
@@ -168,7 +184,7 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 | `tls.redirect` | HTTP 自动 301 到 HTTPS |
 | `tls.httpListen` | HTTP 跳转监听地址，勾选跳转后留空默认 `:80` |
 | `tls.publicPort` | 外网访问的 HTTPS 端口（非 443 时跳转会带上），默认 443 |
-| `security.requireDomain` | 只允许域名访问，IP 直连一律 403 |
+| `security.requireDomain` | 外网只允许域名访问（IP 直连 403）；内网与本机始终放行 |
 | `security.allowLoopback` | 回环豁免，允许 127.0.0.1 / ::1 访问面板（默认开） |
 | `security.extraHosts` | 额外放行的域名（逗号分隔） |
 | `proxy[].hosts` | 域名列表，支持 `*.example.com`、`*` |

@@ -34,10 +34,12 @@ type AdminConfig struct {
 
 // SecurityConfig 是「只允许用域名访问」相关的开关。
 // 路由器开着 IPv6 防火墙时，光靠防火墙只能挡端口，挡不住「IP:端口 直接访问」；
-// 打开 RequireDomain 后，凡是 Host 是 IP 字面量的请求一律拒绝，只认域名。
+// 打开 RequireDomain 后，外网来源的 IP 直连一律拒绝，只认域名；
+// 内网（RFC1918/链路本地/ULA）与本机回环始终放行。
 type SecurityConfig struct {
-	RequireDomain bool     `json:"requireDomain"`
-	AllowLoopback bool     `json:"allowLoopback"`
+	RequireDomain bool `json:"requireDomain"`
+	// AllowLoopback 已废弃（1.3.0 起内网与本机始终放行），仅为兼容旧配置文件保留。
+	AllowLoopback bool     `json:"allowLoopback,omitempty"`
 	ExtraHosts    []string `json:"extraHosts,omitempty"`
 }
 

@@ -109,7 +109,6 @@ function fillForms() {
 
   const sec = c.security || {};
   $('#s-reqdomain').checked = !!sec.requireDomain;
-  $('#s-loopback').checked = sec.allowLoopback !== false;
   $('#s-extrahosts').value = (sec.extraHosts || []).join(', ');
 
   const f = c.forward || {}, ac = c.acme || {};
@@ -446,7 +445,6 @@ function collectConfig() {
   // 访问控制
   c.security = c.security || {};
   c.security.requireDomain = $('#s-reqdomain').checked;
-  c.security.allowLoopback = $('#s-loopback').checked;
   c.security.extraHosts = $('#s-extrahosts').value
     .split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
 

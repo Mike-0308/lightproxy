@@ -4,7 +4,8 @@
 #   本地安装：  sh install.sh /tmp/lightproxy-armv7
 #   一行安装：  curl -fsSL https://raw.githubusercontent.com/OWNER/lightproxy/main/scripts/install.sh | sh
 #              （自动识别架构并从 GitHub Releases 下载对应二进制）
-#   卸载：      sh install.sh --uninstall
+#   一行卸载：  curl -fsSL https://raw.githubusercontent.com/OWNER/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
+#   本地卸载：  sh install.sh --uninstall
 set -u
 
 # 默认仓库；一行安装时从这里下载二进制，可用环境变量 LP_REPO 覆盖（owner/repo）
@@ -21,6 +22,12 @@ uninstall_all() {
   for P in /data/lightproxy /opt/lightproxy /etc/lightproxy /tmp/lightproxy; do
     [ -d "$P" ] || continue
     say "卸载 $P"
+    # 先摘掉开机挂钩再停进程，避免 procd 的 respawn 又把它拉起来
+    if [ -f /etc/init.d/lightproxy ]; then
+      /etc/init.d/lightproxy disable >/dev/null 2>&1
+      /etc/init.d/lightproxy stop >/dev/null 2>&1
+      rm -f /etc/init.d/lightproxy
+    fi
     [ -x "$P/ctl" ] && "$P/ctl" stop >/dev/null 2>&1
     if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
       uci -q delete firewall.lightproxy >/dev/null 2>&1
@@ -29,18 +36,15 @@ uninstall_all() {
     fi
     if [ -f /etc/rc.local ]; then
       sed -i "\|$P/ctl start|d" /etc/rc.local 2>/dev/null
-    fi
-    if [ -f /etc/init.d/lightproxy ]; then
-      /etc/init.d/lightproxy stop >/dev/null 2>&1
-      /etc/init.d/lightproxy disable >/dev/null 2>&1
-      rm -f /etc/init.d/lightproxy
+      sed -i "\|$P/startup.sh|d" /etc/rc.local 2>/dev/null
     fi
     if [ -f /etc/crontabs/root ]; then
       sed -i "\|$P/ctl start|d" /etc/crontabs/root 2>/dev/null
     fi
     rm -rf "$P"
   done
-  say "已卸载。"
+  say "已卸载。配置与证书随目录一并删除；如需保留配置，"
+  say "卸载前先在面板「设置 → 配置备份 → 导出配置」下载一份。"
   exit 0
 }
 

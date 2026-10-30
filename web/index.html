@@ -289,17 +289,15 @@
     <div class="card">
       <div class="card-hd"><h2>访问控制</h2></div>
       <p class="tip">路由器自带的 IPv6 防火墙能挡端口，但挡不住「IP:端口 直接打开面板」。打开下面这项后，
-        凡是用 IP 访问的一律 403，只认反向代理规则里配置的域名——配合「端口转发」页的自动放行，就是「只有域名能进」。</p>
+        <b>外网</b>用 IP（v4/v6）访问反代或面板一律 403，只认反向代理规则里配置的域名——
+        配合「端口转发」页的自动放行，就是「只有域名能进」。<b>内网与本机（127.0.0.1）不受影响，始终可以访问</b>，日常使用无需域名。</p>
       <div class="form">
         <label class="row checks-inline"><span>只允许域名访问</span>
-          <label class="chk"><input type="checkbox" id="s-reqdomain"> 禁止用 IP 直接访问反代与面板</label>
-        </label>
-        <label class="row checks-inline"><span>本机回环</span>
-          <label class="chk"><input type="checkbox" id="s-loopback"> 允许 127.0.0.1 / ::1 访问面板（防自锁，建议保留）</label>
+          <label class="chk"><input type="checkbox" id="s-reqdomain"> 外网禁止用 IP 直接访问（内网不受限）</label>
         </label>
         <label class="row"><span>额外允许的域名</span><input id="s-extrahosts" placeholder="可留空，多个用逗号分隔"></label>
       </div>
-      <p class="tip">开启后请确认已有一条反代规则指向 <code>http://127.0.0.1:8081</code>，否则只能靠 SSH 隧道进面板救急。</p>
+      <p class="tip">面板端口（8081）不会写进防火墙放行名单，外网本来就够不着；这项开关是应用层的第二道保险。</p>
     </div>
 
     <div class="card">
