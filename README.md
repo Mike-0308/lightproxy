@@ -63,8 +63,17 @@
 路由器 SSH 里执行，会弹出向导（先选做什么，再选装到哪）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
 ```
+
+> 上面这条只下载 21KB 的安装脚本，加了超时，网络不通会立刻报错而不是一直卡着。
+> 如果 `raw.githubusercontent.com` 在你那边打不开，换下面任一地址拿同一个脚本：
+> ```bash
+> # jsDelivr 镜像
+> curl -fsSL https://cdn.jsdelivr.net/gh/Mike-0308/lightproxy@main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+> # 或者 Release 里的同一份
+> curl -fsSL https://github.com/Mike-0308/lightproxy/releases/latest/download/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+> ```
 
 向导长这样：
 
