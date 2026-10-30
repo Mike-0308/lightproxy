@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.4.0"
+var version = "1.0.0"
 
 type App struct {
 	mu      sync.Mutex

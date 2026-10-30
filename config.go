@@ -45,7 +45,7 @@ type AdminConfig struct {
 // 内网（RFC1918/链路本地/ULA）与本机回环始终放行。
 type SecurityConfig struct {
 	RequireDomain bool `json:"requireDomain"`
-	// AllowLoopback 已废弃（1.3.0 起内网与本机始终放行），仅为兼容旧配置文件保留。
+	// AllowLoopback 已废弃（内网与本机回环始终放行），仅为兼容旧配置文件保留。
 	AllowLoopback bool     `json:"allowLoopback,omitempty"`
 	ExtraHosts    []string `json:"extraHosts,omitempty"`
 }
