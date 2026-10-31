@@ -2,6 +2,9 @@
 # 轻代理 lightproxy 安装脚本（在路由器上执行，busybox sh 兼容）
 #
 #   一键安装（推荐，会弹出菜单）：
+#     国内直连（Gitee，最快）：
+#     curl -fsSL https://gitee.com/jxmike/lightproxy/raw/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+#     GitHub：
 #     curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
 #   管道方式（同样能弹菜单，脚本自己读 /dev/tty）：
 #     curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
@@ -14,6 +17,10 @@ set -u
 
 # 默认仓库；下载二进制时用，可用 LP_REPO 覆盖（owner/repo）
 DEFAULT_REPO="Mike-0308/lightproxy"
+# Gitee 镜像仓库：二进制优先从这里下（国内直连快），可用 LP_GITEE 覆盖
+DEFAULT_GITEE="jxmike/lightproxy"
+# Gitee 上对应的发行版标签；发新版时与脚本一起改
+GITEE_TAG="${LP_GITEE_TAG:-v1.3.0}"
 # 自定义镜像可放最前面：LP_MIRROR="https://your.mirror" sh install.sh
 LP_MIRROR="${LP_MIRROR:-}"
 
@@ -253,6 +260,8 @@ mkdir -p "$PREFIX/bin" "$PREFIX/run"
 
 # ---------------------------------------------------------------- 二进制：下载 or 本地传入
 REPO="${LP_REPO:-$DEFAULT_REPO}"
+# Gitee 镜像：国内直连，放在下载源第一位
+GITEE_REPO="${LP_GITEE:-$DEFAULT_GITEE}"
 ARCH=$(uname -m)
 case "$ARCH" in
   armv7l|armv7|armv6l|arm) FILE="lightproxy-linux-armv7" ;;
@@ -277,7 +286,9 @@ fetch_one() {   # $1=URL $2=输出文件
 
 download_bin() {
   BASE="https://github.com/$REPO/releases/latest/download/$FILE"
-  LIST="$BASE
+  GITEE="https://gitee.com/$GITEE_REPO/releases/download/$GITEE_TAG/$FILE"
+  LIST="$GITEE
+$BASE
 https://ghfast.top/$BASE
 https://gh-proxy.com/$BASE
 https://ghproxy.net/$BASE"
@@ -328,7 +339,10 @@ if [ -z "$BIN_SRC" ]; then
     err ""
     err "几个下载源都没成功，可以试试："
     err "  1) 换网络（手机热点）后重跑本脚本"
-    err "  2) 电脑上下载 https://github.com/$REPO/releases/latest/download/$FILE"
+    err "  2) 电脑上下载（国内走这个）："
+    err "     https://gitee.com/$GITEE_REPO/releases/download/$GITEE_TAG/$FILE"
+    err "  3) 或 GitHub："
+    err "     https://github.com/$REPO/releases/latest/download/$FILE"
     err "     再 scp 到路由器执行：sh install.sh /tmp/$FILE"
     exit 1
   fi
