@@ -82,18 +82,23 @@
 
 路由器 SSH 里执行，会弹出向导（先选做什么，再选装到哪）：
 
+**国内推荐用 Gitee（直连，不用镜像绕路）：**
+
+```bash
+curl -fsSL --connect-timeout 10 --max-time 60 https://gitee.com/jxmike/lightproxy/raw/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
+```
+
+**GitHub 版（海外或已有代理）：**
+
 ```bash
 curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
 ```
 
-> 上面这条只下载 21KB 的安装脚本，加了超时，网络不通会立刻报错而不是一直卡着。
-> 如果 `raw.githubusercontent.com` 在你那边打不开，换下面任一地址拿同一个脚本：
-> ```bash
-> # jsDelivr 镜像
-> curl -fsSL https://cdn.jsdelivr.net/gh/Mike-0308/lightproxy@main/scripts/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
-> # 或者 Release 里的同一份
-> curl -fsSL https://github.com/Mike-0308/lightproxy/releases/latest/download/install.sh -o /tmp/lp.sh && sh /tmp/lp.sh
-> ```
+> 两条命令拿到的是同一份脚本，只下载 21KB，加了超时，网络不通会立刻报错而不是一直卡着。
+> 脚本内部再下载 7MB 二进制时，**优先走 Gitee**，连不上才依次退回 GitHub 和 `ghfast.top` / `gh-proxy.com` / `ghproxy.net` 镜像，全程不用你干预。
+>
+> 想强制指定某个源：`LP_MIRROR=https://your.mirror sh /tmp/lp.sh`；
+> Gitee 仓库换成自己的：`LP_GITEE=你的用户名/lightproxy sh /tmp/lp.sh`。
 
 向导长这样：
 
@@ -122,7 +127,7 @@ curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/
 
 之后脚本自动完成：识别架构 → 下载对应二进制 → 试运行自检 → 写默认配置 → 挂开机自启 → 启动。
 
-**下载 7MB 左右，网慢要等几分钟**，脚本会把话说清楚：有进度条；卡住时每 10 秒打一个 `[秒数]` 表示还在等；某个源连不上自动换镜像（GitHub → `ghfast.top` → `gh-proxy.com` → `ghproxy.net`），不用你干预。
+**下载 7MB 左右，网慢要等几分钟**，脚本会把话说清楚：有进度条；卡住时每 10 秒打一个 `[秒数]` 表示还在等；某个源连不上自动换镜像（Gitee → GitHub → `ghfast.top` → `gh-proxy.com` → `ghproxy.net`），不用你干预。
 
 > 之前装过的话，向导会提示「检测到已安装在 xxx」，选它即为升级，配置和证书都保留。
 
