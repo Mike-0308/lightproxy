@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,15 +34,19 @@ const (
 )
 
 type FirewallState struct {
-	Backend   string    `json:"backend"`
-	Ready     bool      `json:"ready"`
-	Applied   int       `json:"applied"`
-	Hairpin   bool      `json:"hairpin"`
-	OpenPorts []int     `json:"openPorts,omitempty"`
+	Backend   string `json:"backend"`
+	Ready     bool   `json:"ready"`
+	Applied   int    `json:"applied"`
+	Hairpin   bool   `json:"hairpin"`
+	OpenPorts []int  `json:"openPorts,omitempty"`
+	// RelayPorts 是 IPv6 用户态转发正在监听的端口。
+	RelayPorts []int `json:"relayPorts,omitempty"`
+	// Knocks 是「敲门放行」名单快照（前缀 + 剩余有效期）。
+	Knocks    []string  `json:"knocks,omitempty"`
 	Updated   time.Time `json:"updated"`
-	Persist   string    `json:"persist,omitempty"`
-	Message   string    `json:"message,omitempty"`
-	Err       string    `json:"error,omitempty"`
+	Persist    string    `json:"persist,omitempty"`
+	Message    string    `json:"message,omitempty"`
+	Err        string    `json:"error,omitempty"`
 }
 
 type fwTool struct {
@@ -175,6 +180,57 @@ func activeForwardRules(fc ForwardConfig) []ForwardRule {
 	return out
 }
 
+// usableForwardRules 返回可以真正下发的转发规则：目标合法、外网端口不与本机
+// 已占用端口（反代监听、HTTP 跳转、管理面板）冲突。冲突规则跳过内核 DNAT 和
+// 用户态转发，否则外网打到 :8686 这类端口会被劫持到内网目标，反代直接失效。
+func usableForwardRules(fc ForwardConfig) (usable []ForwardRule, conflicts []int) {
+	occ := make(map[int]bool, len(fc.Occupied))
+	for _, p := range fc.Occupied {
+		occ[p] = true
+	}
+	usable = make([]ForwardRule, 0, len(fc.Rules))
+	for _, r := range activeForwardRules(fc) {
+		if r.Port <= 0 || r.Port > 65535 || r.ToHost == "" || r.ToPort <= 0 {
+			continue
+		}
+		if occ[r.Port] {
+			conflicts = append(conflicts, r.Port)
+			continue
+		}
+		usable = append(usable, r)
+	}
+	return usable, conflicts
+}
+
+// relayPorts 返回需要用户态转发的端口去重列表。
+func relayPorts(rules []ForwardRule) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, r := range rules {
+		if !seen[r.Port] {
+			seen[r.Port] = true
+			out = append(out, r.Port)
+		}
+	}
+	return out
+}
+
+// mergePorts 合并端口列表并去重升序，供防火墙放行列表使用。
+func mergePorts(lists ...[]int) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, l := range lists {
+		for _, p := range l {
+			if p > 0 && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
 func destOf(r ForwardRule) string {
 	return r.ToHost + ":" + strconv.Itoa(r.ToPort)
 }
@@ -190,6 +246,7 @@ func (t fwTool) apply(fc ForwardConfig) error {
 }
 
 func (t fwTool) applyIptables(fc ForwardConfig) error {
+	usable, _ := usableForwardRules(fc)
 	run := func(args ...string) error {
 		if _, err := execCmd(t.bin, args...); err != nil {
 			return fmt.Errorf("iptables %s 失败: %v", strings.Join(args, " "), err)
@@ -211,7 +268,7 @@ func (t fwTool) applyIptables(fc ForwardConfig) error {
 	if err := run("-t", "nat", "-F", fwNatChain); err != nil {
 		return err
 	}
-	for _, r := range activeForwardRules(fc) {
+	for _, r := range usable {
 		for _, p := range protoList(r.Proto) {
 			if err := run("-t", "nat", "-A", fwNatChain,
 				"-p", p, "--dport", strconv.Itoa(r.Port),
@@ -235,7 +292,7 @@ func (t fwTool) applyIptables(fc ForwardConfig) error {
 	if err := run("-F", fwAclChain); err != nil {
 		return err
 	}
-	for _, r := range activeForwardRules(fc) {
+	for _, r := range usable {
 		for _, p := range protoList(r.Proto) {
 			dp := strconv.Itoa(r.ToPort)
 			if err := run("-A", fwAclChain, "-p", p, "-d", r.ToHost, "--dport", dp, "-j", "ACCEPT"); err != nil {
@@ -279,7 +336,7 @@ func (t fwTool) applyIptables(fc ForwardConfig) error {
 		return err
 	}
 	if fc.Hairpin {
-		for _, r := range activeForwardRules(fc) {
+		for _, r := range usable {
 			for _, p := range protoList(r.Proto) {
 				if err := run("-t", "nat", "-A", fwMasqChain,
 					"-p", p, "-d", r.ToHost, "--dport", strconv.Itoa(r.ToPort),
@@ -343,19 +400,20 @@ func (t fwTool) openLocalPorts(chain string, ports []int) error {
 // buildNftScript 一次性渲染整张表，交给 nft -f 加载，
 // 避免把含分号的语句塞进 shell 导致转义问题。
 func buildNftScript(fc ForwardConfig) string {
+	usable, _ := usableForwardRules(fc)
 	var b strings.Builder
 	b.WriteString("add table inet " + fwNftTable + "\n")
 	b.WriteString("delete table inet " + fwNftTable + "\n")
 	b.WriteString("table inet " + fwNftTable + " {\n")
 	b.WriteString("\tchain prerouting {\n\t\ttype nat hook prerouting priority -110; policy accept;\n")
-	for _, r := range activeForwardRules(fc) {
+	for _, r := range usable {
 		for _, p := range protoList(r.Proto) {
 			fmt.Fprintf(&b, "\t\t%s dport %d dnat ip to %s\n", p, r.Port, destOf(r))
 		}
 	}
 	b.WriteString("\t}\n")
 	b.WriteString("\tchain forward {\n\t\ttype filter hook forward priority -10; policy accept;\n")
-	for _, r := range activeForwardRules(fc) {
+	for _, r := range usable {
 		for _, p := range protoList(r.Proto) {
 			dp := strconv.Itoa(r.ToPort)
 			fmt.Fprintf(&b, "\t\tip daddr %s %s dport %s accept\n", r.ToHost, p, dp)
@@ -375,7 +433,7 @@ func buildNftScript(fc ForwardConfig) string {
 	}
 	if fc.Hairpin {
 		b.WriteString("\tchain postrouting {\n\t\ttype nat hook postrouting priority 100; policy accept;\n")
-		for _, r := range activeForwardRules(fc) {
+		for _, r := range usable {
 			for _, p := range protoList(r.Proto) {
 				fmt.Fprintf(&b, "\t\tip daddr %s %s dport %s masquerade\n", r.ToHost, p, strconv.Itoa(r.ToPort))
 			}
@@ -446,6 +504,7 @@ func (t fwTool) clear() error {
 // ---------------- 开机持久化 ----------------
 
 func renderPersistScript(t fwTool, fc ForwardConfig) string {
+	usable, _ := usableForwardRules(fc)
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("# 由轻代理自动生成，请勿手工修改；改规则请在面板操作。\n")
@@ -491,7 +550,7 @@ func renderPersistScript(t fwTool, fc ForwardConfig) string {
 	fmt.Fprintf(&b, "$IPT -t nat -C POSTROUTING -j %s 2>/dev/null || $IPT -t nat -I POSTROUTING 1 -j %s\n", fwMasqChain, fwMasqChain)
 	fmt.Fprintf(&b, "$IPT -t nat -F %s\n", fwMasqChain)
 
-	for _, r := range activeForwardRules(fc) {
+	for _, r := range usable {
 		for _, p := range protoList(r.Proto) {
 			dp := strconv.Itoa(r.ToPort)
 			fmt.Fprintf(&b, "$IPT -t nat -A %s -p %s --dport %d -j DNAT --to-destination %s\n",
@@ -574,17 +633,32 @@ type ForwardManager struct {
 	mu      sync.Mutex
 	logs    *LogBuffer
 	cfgPath string
+	relay   *Relay
 	state   FirewallState
 }
 
 func NewForwardManager(logs *LogBuffer, cfgPath string) *ForwardManager {
-	return &ForwardManager{logs: logs, cfgPath: cfgPath}
+	return &ForwardManager{logs: logs, cfgPath: cfgPath, relay: NewRelay(logs)}
+}
+
+// Close 停掉用户态转发，进程退出前调用。
+func (m *ForwardManager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.relay != nil {
+		m.relay.Stop()
+	}
 }
 
 func (m *ForwardManager) Snapshot() FirewallState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.state
+	st := m.state
+	// 名单随时在变（不经过 Apply），取快照时顺带带上当前状态
+	if st.Knocks = knocks.snapshot(); len(st.Knocks) == 0 {
+		st.Knocks = nil
+	}
+	return st
 }
 
 // Apply 是幂等的：重复调用只会 flush 并重写自己的链。
@@ -597,9 +671,27 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	usable, conflicts := usableForwardRules(fc)
+	if len(conflicts) > 0 && m.logs != nil {
+		m.logs.Warnf("转发规则的外网端口 %v 与反代/面板端口冲突，已整条跳过（换一个外网端口即可）", conflicts)
+	}
+
+	// 用户态转发（IPv6 → 内网）与防火墙完全解耦：防火墙不可用（Windows、
+	// 缺 iptables）也能工作；IPv4 流量已被 DNAT 接管，这里的监听只吃 IPv6。
+	var rports []int
+	if fc.Enable && fc.V6On() && len(usable) > 0 {
+		m.relay.Apply(usable)
+		rports = relayPorts(usable)
+		// 映射端口也要写进 INPUT 放行（v4/v6 都开）：IPv6 流量要打到路由器
+		// 自身才能被用户态转发接住，防火墙不开就表现为「域名能解析但连不上」。
+		fc.LocalPorts = mergePorts(fc.LocalPorts, rports)
+	} else {
+		m.relay.Apply(nil)
+	}
+
 	// 什么都没有：尽力清理内核残留，环境里没有防火墙工具不算错误
 	if !fc.Enable && len(fc.LocalPorts) == 0 {
-		st := FirewallState{Backend: "off", Updated: time.Now()}
+		st := FirewallState{Backend: "off", Updated: time.Now(), RelayPorts: rports}
 		if t, derr := detectFirewall(fc.Backend); derr == nil && t.kind != "none" {
 			if err := t.clear(); err != nil {
 				st.Err = err.Error()
@@ -612,7 +704,7 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	}
 
 	t, derr := detectFirewall(fc.Backend)
-	st := FirewallState{Backend: t.kind, Updated: time.Now()}
+	st := FirewallState{Backend: t.kind, Updated: time.Now(), RelayPorts: rports}
 	if derr != nil {
 		st.Err = derr.Error()
 		m.state = st
@@ -646,7 +738,7 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	}
 
 	st.Ready = true
-	st.Applied = len(activeForwardRules(fc))
+	st.Applied = len(usable)
 	st.Hairpin = fc.Hairpin
 	st.OpenPorts = fc.LocalPorts
 	st.Persist = m.persist(t, fc)
@@ -654,9 +746,10 @@ func (m *ForwardManager) Apply(fc ForwardConfig) error {
 	m.state = st
 	if m.logs != nil {
 		if fc.Enable {
-			m.logs.Infof("端口转发已生效：%d 条规则（%s），%s", st.Applied, t.kind, st.Persist)
+			m.logs.Infof("端口转发已生效：%d 条规则（%s，IPv6 用户态转发 %v），%s",
+				st.Applied, t.kind, rports, st.Persist)
 		} else {
-			m.logs.Infof("端口转发未启用；已自动放行反代监听端口 %v（%s），%s", fc.LocalPorts, t.kind, st.Persist)
+			m.logs.Infof("端口转发未启用；已自动放行本机端口 %v（%s），%s", fc.LocalPorts, t.kind, st.Persist)
 		}
 	}
 	return nil

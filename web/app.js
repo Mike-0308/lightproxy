@@ -114,12 +114,14 @@ function fillForms() {
   $('#s-reqdomain').checked = !!sec.requireDomain;
   $('#s-extrahosts').value = (sec.extraHosts || []).join(', ');
   $('#s-entry').value = sec.entryPath || '';
+  $('#f-knock').checked = !!sec.knockForward;
   renderEntryHint();
 
   const f = c.forward || {}, ac = c.acme || {};
   $('#f-enable').checked = !!f.enable;
   $('#f-backend').value = f.backend || 'auto';
   $('#f-hairpin').checked = !!f.hairpin;
+  $('#f-v6forward').checked = f.v6Forward !== false;
   $('#a-enable').checked = !!ac.enable;
   $('#a-email').value = ac.email || '';
   $('#a-ca').value = ac.ca || 'letsencrypt';
@@ -336,6 +338,8 @@ function renderForward() {
   const meta = [];
   if (st.backend && st.backend !== 'none') meta.push('后端 ' + st.backend);
   if (st.ready) meta.push(st.applied + ' 条已生效');
+  if (st.relayPorts && st.relayPorts.length) meta.push('IPv6 裸转发 ' + st.relayPorts.join('、'));
+  if (st.knocks && st.knocks.length) meta.push('敲门放行 ' + st.knocks.length + ' 个来源');
   if (st.hairpin) meta.push('内网回环');
   if (st.updated && !String(st.updated).startsWith('0001')) meta.push('更新于 ' + fmtTime(st.updated));
   $('#fwdMeta').textContent = meta.join(' · ');
@@ -352,6 +356,16 @@ function renderForward() {
     rows.push(`<div class="mini-row"><span class="dot ok"></span><div class="grow">
       <div>${st.applied} 条转发规则已写入 ${esc(st.backend)}</div>
       <div class="mono">${esc(st.persist || '未做开机持久化')}</div></div></div>`);
+    if (st.relayPorts && st.relayPorts.length) {
+      rows.push(`<div class="mini-row"><span class="dot ok"></span><div class="grow">
+        <div>IPv6 用户态转发监听中：${st.relayPorts.join('、')}</div>
+        <div class="mono">外网 IPv6 打这些端口会原样转给规则里的内网目标（RDP/SSH 等任意 TCP/UDP）</div></div></div>`);
+      if (st.knocks && st.knocks.length) {
+        rows.push(`<div class="mini-row"><span class="dot ok"></span><div class="grow">
+          <div>已敲门放行：${esc(st.knocks.join('、'))}</div>
+          <div class="mono">只有这些来源网络能连转发的端口（重新访问安全入口可续期）</div></div></div>`);
+      }
+    }
     if (st.openPorts && st.openPorts.length) {
       rows.push(`<div class="mini-row"><span class="dot ok"></span><div class="grow">
         <div>反代端口已对外放行：${st.openPorts.join('、')}</div>
@@ -491,12 +505,14 @@ function collectConfig() {
   c.security.extraHosts = $('#s-extrahosts').value
     .split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
   c.security.entryPath = $('#s-entry').value.trim();
+  c.security.knockForward = $('#f-knock').checked;
 
   // 端口转发
   c.forward = c.forward || {};
   c.forward.enable = $('#f-enable').checked;
   c.forward.backend = $('#f-backend').value;
   c.forward.hairpin = $('#f-hairpin').checked;
+  c.forward.v6Forward = $('#f-v6forward').checked;
   syncForwardRules(c);
 
   // 自动证书

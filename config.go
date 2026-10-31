@@ -52,6 +52,16 @@ type SecurityConfig struct {
 	// 填了以后外网必须带上这个前缀才能访问，直接访问域名根路径一律 404；
 	// 内网来源不受影响，免得自己在家里也被挡住。
 	EntryPath string `json:"entryPath,omitempty"`
+	// KnockForward 开启「转发端口敲门放行」：用户态转发的端口不再对任何人响应，
+	// 只有浏览器先通过一次安全入口的来源网络才放行（按来源 /64 记录，IPv4 按单个
+	// IP），名单外的连接接受后立即断开，扫描器识别不出端口后面的服务。
+	// 依赖 EntryPath（没配入口路径时此项不生效），有效期与入口票据一致（7 天）。
+	KnockForward bool `json:"knockForward,omitempty"`
+}
+
+// knockRequired 返回转发端口是否需要敲门放行（敲门开关依赖安全入口）。
+func (c *Config) knockRequired() bool {
+	return c.Security.KnockForward && c.Security.EntryPath != ""
 }
 
 type TLSConfig struct {
@@ -126,10 +136,22 @@ type ForwardConfig struct {
 	Backend string        `json:"backend"`
 	Hairpin bool          `json:"hairpin,omitempty"`
 	Rules   []ForwardRule `json:"rules"`
+	// V6Forward 开启「IPv6 用户态转发」：外网 IPv6 → 内网 IPv4 的端口映射走
+	// 进程内裸 TCP/UDP 转发（内核 NAT66 不支持跨协议族）。缺省视为开启；
+	// 关掉后只有 IPv4 DNAT 生效（无公网 IPv4 的家宽外网就进不来了）。
+	V6Forward *bool `json:"v6Forward,omitempty"`
 	// LocalPorts 由程序在运行时填充（反代监听端口 + HTTP 跳转端口），不写进配置文件。
 	// 开启端口转发后会一并写进 INPUT 放行，这样路由器自带防火墙开着也能从外网访问到反代；
 	// 管理面板端口不在其中，永远不对外放行。
 	LocalPorts []int `json:"-"`
+	// Occupied 由程序在运行时填充：本机已被占用的端口（反代/跳转/面板），
+	// 转发规则撞上这些端口时整条跳过，避免劫持自己的服务。不写进配置文件。
+	Occupied []int `json:"-"`
+}
+
+// V6On 返回是否启用 IPv6 用户态转发（缺省开启）。
+func (fc *ForwardConfig) V6On() bool {
+	return fc.V6Forward == nil || *fc.V6Forward
 }
 
 // ForwardRule 是一条「外网端口 → 内网主机」的内核 DNAT 规则。

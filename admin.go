@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.1.0"
+var version = "1.3.0"
 
 type App struct {
 	mu      sync.Mutex
@@ -383,6 +383,18 @@ func (a *App) applyForward(cfg *Config) error {
 	}
 	fc := cfg.Forward
 	fc.LocalPorts = localForwardPorts(cfg)
+	// 敲门放行开关与转发解耦：只改开关不重建监听，不打断进行中的会话
+	SetKnockEnabled(cfg.knockRequired())
+	if cfg.Security.KnockForward && cfg.Security.EntryPath == "" {
+		a.logs.Warnf("「转发端口敲门放行」需要先配置安全入口，当前未生效")
+	}
+	// 占用端口 = 反代/跳转端口 + 面板端口：转发规则撞上就整条跳过
+	fc.Occupied = append([]int{}, fc.LocalPorts...)
+	if _, portStr, err := net.SplitHostPort(cfg.Admin.Listen); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			fc.Occupied = append(fc.Occupied, p)
+		}
+	}
 	return a.forward.Apply(fc)
 }
 
@@ -395,6 +407,9 @@ func (a *App) proxyHandler() http.Handler {
 			denyEntry(w)
 			return
 		}
+		// 通过安全入口的来源网络顺手完成「敲门」：转发的端口只对这个
+		// 网络前缀放行（内网/本机来源也在内，方便在家直连转发端口）。
+		knocks.record(r.RemoteAddr)
 		if path != r.URL.Path {
 			// 走的是安全入口：把前缀剥掉再按原规则匹配，
 			// 这样入口内的应用看到的仍然是 /、/api/... 这些它自己的路径。
@@ -1023,6 +1038,7 @@ func (a *App) handleForwardClear(w http.ResponseWriter, r *http.Request) {
 	fc.Enable = false
 	// 清的是转发规则，反代自己的监听端口要继续放行
 	fc.LocalPorts = localForwardPorts(cfg)
+	fc.Occupied = append([]int{}, fc.LocalPorts...)
 	if err := a.forward.Apply(fc); err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
