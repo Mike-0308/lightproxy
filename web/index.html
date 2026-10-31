@@ -123,8 +123,10 @@
             <option value="off">只在面板保存，不下发</option>
           </select>
         </label>
-        <label class="row checks-inline span2"><span>内网回环</span>
-          <label class="chk"><input type="checkbox" id="f-hairpin"> 允许内网设备用公网 IP 访问</label>
+        <label class="row checks-inline"><span>选项</span>
+          <label class="chk"><input type="checkbox" id="f-hairpin"> 内网回环（内网设备用公网 IP 访问）</label>
+          <label class="chk"><input type="checkbox" id="f-v6forward"> IPv6 裸转发（外网 IPv6 → 内网，默认开）</label>
+          <label class="chk"><input type="checkbox" id="f-knock"> 转发端口敲门放行（先访问安全入口才响应，需在「访问控制」里配置入口路径）</label>
         </label>
       </div>
 
@@ -308,7 +310,9 @@
         <code>https://你的域名:端口/x7k2m</code> 才能进，直接打开 <code>https://你的域名:端口/</code> 一律返回 404，
         看起来就像这个端口上没有服务——端口扫描器扫到了也进不来。<br>
         进过一次之后，浏览器会拿到一张 7 天有效的通行票据，页面里的 <code>/static</code>、<code>/api</code> 等资源照常加载，不用每次重输。
-        <b>内网与本机始终可以直接访问</b>，不会把自己锁在外面；改了路径旧票据立即失效。</p>
+        <b>内网与本机始终可以直接访问</b>，不会把自己锁在外面；改了路径旧票据立即失效。<br>
+        另外，在「端口转发」页勾选<b>「转发端口敲门放行」</b>后，访问过这个入口的来源网络也会被加进转发端口的放行名单
+        （IPv6 按 /64 记录，7 天有效）——出门前/到店里先开一次网页，mstsc 等直连端口的应用就都能用了。</p>
       <div class="form">
         <label class="row"><span>入口路径</span>
           <input id="s-entry" placeholder="留空则不启用，例如 /x7k2m">

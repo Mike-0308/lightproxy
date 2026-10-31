@@ -18,7 +18,8 @@
     "requireDomain": false,
     "allowLoopback": true,
     "extraHosts": [],
-    "entryPath": ""
+    "entryPath": "",
+    "knockForward": false
   },
   "proxy": [
     {
@@ -86,6 +87,7 @@
     "enable": true,
     "backend": "auto",
     "hairpin": true,
+    "v6Forward": true,
     "rules": [
       { "name": "反代 HTTPS", "proto": "tcp", "port": 443, "toHost": "192.168.31.1", "toPort": 8443 }
     ]
