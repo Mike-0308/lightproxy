@@ -26,6 +26,7 @@ const (
 	fwNatChain  = "LP_FWD"
 	fwAclChain  = "LP_ACL"
 	fwInChain   = "LP_IN"
+	fwIn6Chain  = "LP_IN6"
 	fwMasqChain = "LP_MASQ"
 	fwNftTable  = "lp_fwd"
 	fwScript    = "firewall.sh"
@@ -250,25 +251,14 @@ func (t fwTool) applyIptables(fc ForwardConfig) error {
 	// --- filter：放行「到路由器自身」的反代端口 ---
 	// 路由器自带防火墙（尤其 IPv6）默认拒绝入站，反代端口必须显式放行；
 	// 管理面板端口不在 LocalPorts 里，永远不对外开。
+	// IPv4 与 IPv6 都要开：公网没有 IPv4 时域名只解析出 AAAA，流量走 v6，
+	// 而 fw3 的 zone_wan_input 末尾对 v6 是 REJECT，不开就会表现为「域名能解析但打不开」。
+	if err := t.openLocalPorts(fwInChain, fc.LocalPorts); err != nil {
+		return err
+	}
 	if len(fc.LocalPorts) > 0 {
-		if !t.hasChain("", fwInChain) {
-			if err := run("-N", fwInChain); err != nil {
-				return err
-			}
-		}
-		if !t.hasJump("", "INPUT", fwInChain) {
-			if err := run("-I", "INPUT", "1", "-j", fwInChain); err != nil {
-				return err
-			}
-		}
-		if err := run("-F", fwInChain); err != nil {
-			return err
-		}
-		if err := run("-A", fwInChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
-			return err
-		}
-		for _, p := range fc.LocalPorts {
-			if err := run("-A", fwInChain, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT"); err != nil {
+		if t6, ok := ip6Tool(); ok {
+			if err := t6.openLocalPorts(fwIn6Chain, fc.LocalPorts); err != nil {
 				return err
 			}
 		}
@@ -297,6 +287,54 @@ func (t fwTool) applyIptables(fc ForwardConfig) error {
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// ip6Tool 返回可用的 ip6tables。老固件可能没装，没装就跳过 IPv6 放行。
+func ip6Tool() (fwTool, bool) {
+	bin := findBin("ip6tables", "/usr/sbin/ip6tables", "/sbin/ip6tables", "/usr/bin/ip6tables")
+	if bin == "" {
+		return fwTool{}, false
+	}
+	if _, err := execCmd(bin, "-S", "INPUT"); err != nil {
+		return fwTool{}, false
+	}
+	return fwTool{kind: "iptables", bin: bin}, true
+}
+
+// openLocalPorts 在 INPUT 链前面挂一条自有链，放行本机监听端口。
+// 只放行 tcp 且精确到端口，管理面板端口不在 ports 里。
+func (t fwTool) openLocalPorts(chain string, ports []int) error {
+	if len(ports) == 0 {
+		return nil
+	}
+	run := func(args ...string) error {
+		if _, err := execCmd(t.bin, args...); err != nil {
+			return fmt.Errorf("%s %s 失败: %v", filepath.Base(t.bin), strings.Join(args, " "), err)
+		}
+		return nil
+	}
+	if !t.hasChain("", chain) {
+		if err := run("-N", chain); err != nil {
+			return err
+		}
+	}
+	if !t.hasJump("", "INPUT", chain) {
+		if err := run("-I", "INPUT", "1", "-j", chain); err != nil {
+			return err
+		}
+	}
+	if err := run("-F", chain); err != nil {
+		return err
+	}
+	if err := run("-A", chain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
+		return err
+	}
+	for _, p := range ports {
+		if err := run("-A", chain, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -388,6 +426,10 @@ func (t fwTool) clear() error {
 			_, e := execCmd(t.bin, "-F", fwInChain)
 			note(e)
 		}
+		if t6, ok := ip6Tool(); ok && t6.hasChain("", fwIn6Chain) {
+			_, e := execCmd(t6.bin, "-F", fwIn6Chain)
+			note(e)
+		}
 		if t.hasChain("nat", fwMasqChain) {
 			_, e := execCmd(t.bin, iptArgs("nat", "-F", fwMasqChain)...)
 			note(e)
@@ -433,6 +475,17 @@ func renderPersistScript(t fwTool, fc ForwardConfig) string {
 		for _, p := range fc.LocalPorts {
 			fmt.Fprintf(&b, "$IPT -A %s -p tcp --dport %d -j ACCEPT\n", fwInChain, p)
 		}
+		// IPv6 没有 NAT，外网直接打到路由器自身，fw3 的 zone_wan_input 末尾是 REJECT
+		b.WriteString("IP6=$(command -v ip6tables 2>/dev/null)\n")
+		b.WriteString("if [ -n \"$IP6\" ]; then\n")
+		fmt.Fprintf(&b, "  $IP6 -N %s 2>/dev/null\n", fwIn6Chain)
+		fmt.Fprintf(&b, "  $IP6 -C INPUT -j %s 2>/dev/null || $IP6 -I INPUT 1 -j %s\n", fwIn6Chain, fwIn6Chain)
+		fmt.Fprintf(&b, "  $IP6 -F %s\n", fwIn6Chain)
+		fmt.Fprintf(&b, "  $IP6 -A %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n", fwIn6Chain)
+		for _, p := range fc.LocalPorts {
+			fmt.Fprintf(&b, "  $IP6 -A %s -p tcp --dport %d -j ACCEPT\n", fwIn6Chain, p)
+		}
+		b.WriteString("fi\n")
 	}
 	fmt.Fprintf(&b, "$IPT -t nat -N %s 2>/dev/null\n", fwMasqChain)
 	fmt.Fprintf(&b, "$IPT -t nat -C POSTROUTING -j %s 2>/dev/null || $IPT -t nat -I POSTROUTING 1 -j %s\n", fwMasqChain, fwMasqChain)

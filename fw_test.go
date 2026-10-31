@@ -286,3 +286,25 @@ func TestPersistScriptOpensLocalPortsWhenForwardDisabled(t *testing.T) {
 		t.Errorf("转发关闭时 nft 脚本不应有 dnat:/n%s", s)
 	}
 }
+
+// IPv6 也要放行：公网只有 IPv6 时，流量不经 DNAT 直接打到路由器自身，
+// fw3 的 zone_wan_input 末尾是 REJECT，缺了这条规则就是「域名能解析但打不开」。
+func TestPersistScriptOpensLocalPortsIPv6(t *testing.T) {
+	fc := testForwardConfig()
+	fc.LocalPorts = []int{8686}
+
+	script := renderPersistScript(fwTool{kind: "iptables", bin: "iptables"}, fc)
+	must := []string{
+		"IP6=$(command -v ip6tables",
+		"$IP6 -I INPUT 1 -j LP_IN6",
+		"$IP6 -A LP_IN6 -p tcp --dport 8686 -j ACCEPT",
+	}
+	for _, m := range must {
+		if !strings.Contains(script, m) {
+			t.Errorf("开机脚本缺少 IPv6 放行: %s\n---\n%s", m, script)
+		}
+	}
+	if strings.Contains(renderPersistScript(fwTool{kind: "iptables", bin: "iptables"}, testForwardConfig()), "LP_IN6") {
+		t.Error("没有本机端口时不该生成 IPv6 放行")
+	}
+}

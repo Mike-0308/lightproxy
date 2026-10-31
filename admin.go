@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.0.1"
+var version = "1.0.2"
 
 type App struct {
 	mu      sync.Mutex
@@ -268,14 +268,13 @@ func (a *App) Start() error {
 	a.servers = servers
 	a.mu.Unlock()
 
-	// 端口转发：内核里的规则重启后可能被清掉，这里补一次
-	if cfg.Forward.Enable {
-		go func() {
-			if err := a.applyForward(cfg); err != nil {
-				a.logs.Warnf("启动时下发端口转发失败: %v", err)
-			}
-		}()
-	}
+	// 防火墙规则：内核里的规则重启后会被清掉，这里补一次。
+	// 即使没启用端口转发，也要放行反代自身的监听端口（含 IPv6）。
+	go func() {
+		if err := a.applyForward(cfg); err != nil {
+			a.logs.Warnf("启动时下发防火墙规则失败: %v", err)
+		}
+	}()
 	if am := a.acme.Load(); am != nil {
 		am.Start()
 	}
@@ -597,26 +596,26 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	writeJSON(w, 200, map[string]any{
-		"version":     version,
-		"uptimeSec":   int64(time.Since(a.started).Seconds()),
-		"hostname":    host,
-		"listen":      cfg.Listen,
-		"adminListen": cfg.Admin.Listen,
-		"tls":         cfg.TLS.Enable,
-		"tlsActive":   tlsActive,
-		"certsDir":    cfg.TLS.CertDir,
+		"version":      version,
+		"uptimeSec":    int64(time.Since(a.started).Seconds()),
+		"hostname":     host,
+		"listen":       cfg.Listen,
+		"adminListen":  cfg.Admin.Listen,
+		"tls":          cfg.TLS.Enable,
+		"tlsActive":    tlsActive,
+		"certsDir":     cfg.TLS.CertDir,
 		"certsDirAuto": cfg.deriveCertDir(),
-		"tlsInfo":     certInfo,
-		"rules":       rules,
+		"tlsInfo":      certInfo,
+		"rules":        rules,
 		"security": map[string]any{
 			"requireDomain": cfg.Security.RequireDomain,
 			"allowLoopback": cfg.Security.AllowLoopback,
 		},
-		"redirect":    cfg.TLS.Redirect,
-		"extraHosts":  cfg.Security.ExtraHosts,
-		"ddns":        ddnsStatus,
-		"forward":     fwd,
-		"acme":        acmeSt,
+		"redirect":   cfg.TLS.Redirect,
+		"extraHosts": cfg.Security.ExtraHosts,
+		"ddns":       ddnsStatus,
+		"forward":    fwd,
+		"acme":       acmeSt,
 		"mem": memInfo{
 			HeapMB:     round1(float64(ms.HeapAlloc) / (1 << 20)),
 			SysMB:      round1(float64(ms.Sys) / (1 << 20)),
@@ -978,7 +977,6 @@ func (a *App) handleACMETest(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"ok": allOK, "zones": zones, "rows": rows})
 }
-
 
 func (a *App) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
