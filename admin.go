@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.0.2"
+var version = "1.0.3"
 
 type App struct {
 	mu      sync.Mutex
@@ -236,7 +236,11 @@ func (a *App) Start() error {
 			go func() {
 				a.logs.Infof("HTTP 跳转监听 %s", cfg.TLS.HTTPListen)
 				if err := rs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					a.logs.Errorf("HTTP 跳转监听失败: %v", err)
+					if strings.Contains(err.Error(), "address already in use") {
+						a.logs.Errorf("HTTP 跳转监听 %s 失败：端口被占用（80 通常是路由器管理后台 uhttpd），换个高位端口或关掉 HTTP 跳转", cfg.TLS.HTTPListen)
+					} else {
+						a.logs.Errorf("HTTP 跳转监听失败: %v", err)
+					}
 				}
 			}()
 		}

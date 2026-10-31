@@ -231,14 +231,31 @@ func TestLocalForwardPorts(t *testing.T) {
 	c.TLS.CertDir = "/tmp/certs" // 启用 HTTPS 必须有证书来源
 	c.TLS.Redirect = true
 	c.TLS.HTTPListen = ""
-	if err := c.Normalize(); err != nil { // 勾了跳转但没填地址 → 默认 :80
+	if err := c.Normalize(); err != nil {
 		t.Fatalf("配置校验失败: %v", err)
 	}
-	if c.TLS.HTTPListen != ":80" {
-		t.Fatalf("勾选跳转后应默认 :80，得到 %q", c.TLS.HTTPListen)
+	// 勾了跳转但没填地址：不能再默认接管 80（会和路由器管理后台 uhttpd 撞），
+	// 直接视为不启用跳转，只放行反代端口。
+	if c.TLS.HTTPListen != "" {
+		t.Errorf("留空时不该自动填监听地址，得到 %q", c.TLS.HTTPListen)
+	}
+	if c.TLS.Redirect {
+		t.Error("留空监听地址时跳转应自动关闭，否则会去抢 80")
 	}
 	got := localForwardPorts(c)
-	want := []int{8080, 80}
+	want := []int{8080}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("期望 %v，得到 %v", want, got)
+	}
+
+	// 显式填了高位端口，才放行它
+	c.TLS.Redirect = true
+	c.TLS.HTTPListen = ":8686"
+	if err := c.Normalize(); err != nil {
+		t.Fatalf("配置校验失败: %v", err)
+	}
+	got = localForwardPorts(c)
+	want = []int{8080, 8686}
 	if len(got) != len(want) {
 		t.Fatalf("期望 %v，得到 %v", want, got)
 	}

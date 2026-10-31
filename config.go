@@ -314,9 +314,11 @@ func (c *Config) Normalize() error {
 			return err
 		}
 	}
-	// 勾了「HTTP 自动跳转」但没填监听地址时，默认接管 80
+	// 勾了「HTTP 自动跳转」却没填监听地址：不默认接管 80。
+	// 小米等路由器的管理后台（uhttpd）就监听 80，抢了会让路由器 Web 打不开；
+	// 而且家宽 80 通常被运营商封，留空等于不启用 HTTP 入口。
 	if c.TLS.Redirect && c.TLS.HTTPListen == "" {
-		c.TLS.HTTPListen = ":80"
+		c.TLS.Redirect = false
 	}
 	if c.TLS.PublicPort < 0 || c.TLS.PublicPort > 65535 {
 		return fmt.Errorf("HTTPS 公网端口无效: %d", c.TLS.PublicPort)
