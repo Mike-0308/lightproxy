@@ -48,6 +48,10 @@ type SecurityConfig struct {
 	// AllowLoopback 已废弃（内网与本机回环始终放行），仅为兼容旧配置文件保留。
 	AllowLoopback bool     `json:"allowLoopback,omitempty"`
 	ExtraHosts    []string `json:"extraHosts,omitempty"`
+	// EntryPath 是「安全入口」路径，例如 /xxxx。
+	// 填了以后外网必须带上这个前缀才能访问，直接访问域名根路径一律 404；
+	// 内网来源不受影响，免得自己在家里也被挡住。
+	EntryPath string `json:"entryPath,omitempty"`
 }
 
 type TLSConfig struct {
@@ -341,6 +345,12 @@ func (c *Config) Normalize() error {
 	}
 	c.Security.ExtraHosts = extra
 
+	entry, err := normalizeEntryPath(c.Security.EntryPath)
+	if err != nil {
+		return err
+	}
+	c.Security.EntryPath = entry
+
 	names := map[string]bool{}
 	for i := range c.Proxy {
 		r := &c.Proxy[i]
@@ -594,6 +604,44 @@ func normalizePath(p string) string {
 	return p
 }
 
+// normalizeEntryPath 校验并规范化「安全入口」：必须是以 / 开头的字面路径，
+// 只允许字母、数字和 - _ . ~，不允许 * ? # % & = 之类会被 URL 转义或当通配用的字符，
+// 免得用户填了 /a?b 之后自己都访问不进去。留空表示不启用。
+func normalizeEntryPath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	p = strings.ReplaceAll(p, "\\", "/")
+	if p == "" || p == "/" {
+		return "", nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimRight(p, "/")
+	if p == "" || p == "/" {
+		return "", nil
+	}
+	if len(p) > 64 {
+		return "", fmt.Errorf("安全入口太长（最多 64 个字符）: %s", p)
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(segs) > 3 {
+		return "", fmt.Errorf("安全入口最多 3 层，例如 /entry 或 /a/b: %s", p)
+	}
+	for _, s := range segs {
+		if s == "" {
+			return "", fmt.Errorf("安全入口不能有空路径段（不要连写 //）: %s", p)
+		}
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			ok := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' ||
+				ch >= '0' && ch <= '9' || ch == '-' || ch == '_' || ch == '.' || ch == '~'
+			if !ok {
+				return "", fmt.Errorf("安全入口只能包含字母、数字和 - _ . ~，不能用 %q（也不要带 ?、#、%%）: %s", string(ch), p)
+			}
+		}
+	}
+	return p, nil
+}
 func randomPassword() string {
 	b := make([]byte, 5)
 	if _, err := rand.Read(b); err != nil {

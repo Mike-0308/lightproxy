@@ -113,6 +113,8 @@ function fillForms() {
   const sec = c.security || {};
   $('#s-reqdomain').checked = !!sec.requireDomain;
   $('#s-extrahosts').value = (sec.extraHosts || []).join(', ');
+  $('#s-entry').value = sec.entryPath || '';
+  renderEntryHint();
 
   const f = c.forward || {}, ac = c.acme || {};
   $('#f-enable').checked = !!f.enable;
@@ -128,8 +130,44 @@ function fillForms() {
   $('#a-sk').value = ac.accessKeySecret || '';
 }
 
-/* ---------- 概览 ---------- */
+/* ---------- 安全入口提示 ---------- */
 
+// 用第一条规则的域名拼一个完整的外网入口地址，省得用户自己拼端口拼错。
+function renderEntryHint() {
+  const el = $('#s-entry-url');
+  if (!el) return;
+  const raw = ($('#s-entry').value || '').trim();
+  if (!raw) {
+    el.textContent = '未启用';
+    return;
+  }
+  const path = '/' + raw.replace(/^\/+/, '').replace(/\/+$/, '');
+  const rules = (state.config && state.config.proxy) || [];
+  let host = '';
+  for (const r of rules) {
+    if (r.disable) continue;
+    host = (r.hosts || []).find(h => h && !h.startsWith('*.')) || '';
+    if (host) break;
+  }
+  if (!host) {
+    el.textContent = '外网入口：https://你的域名:端口' + path;
+    return;
+  }
+  const port = +$('#s-pubport').value || (state.config && state.config.tls && state.config.tls.publicPort) || 443;
+  el.textContent = '外网入口：https://' + host + (port === 443 ? '' : ':' + port) + path;
+}
+
+function randomEntry() {
+  const chars = 'abcdefghijkmnpqrstuvwxyz23456789';
+  let s = '';
+  const buf = new Uint32Array(6);
+  (window.crypto || window.msCrypto).getRandomValues(buf);
+  for (let i = 0; i < 6; i++) s += chars[buf[i] % chars.length];
+  $('#s-entry').value = '/' + s;
+  renderEntryHint();
+}
+
+/* ---------- 概览 ---------- */
 function renderOverview() {
   const s = state.status;
   if (!s) return;
@@ -144,6 +182,11 @@ function renderOverview() {
     : '未启用';
   $('#ov-ver').textContent = 'v' + s.version + ' · ' + s.hostname;
   $('#ov-restart').textContent = s.needRestart ? '有改动待重启生效' : '';
+
+  const entry = (s.security && s.security.entryPath) || '';
+  $('#ov-entry').textContent = entry
+    ? entry + '（外网只认这个路径，内网不受限）'
+    : '未启用';
 
   const rules = s.rules || [];
   $('#ov-rules').innerHTML = rules.length
@@ -447,6 +490,7 @@ function collectConfig() {
   c.security.requireDomain = $('#s-reqdomain').checked;
   c.security.extraHosts = $('#s-extrahosts').value
     .split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+  c.security.entryPath = $('#s-entry').value.trim();
 
   // 端口转发
   c.forward = c.forward || {};
@@ -472,14 +516,28 @@ async function saveConfig(cfg, errEl) {
   hide(errEl);
   try {
     await api('/api/config', { method: 'POST', body: JSON.stringify(cfg || collectConfig()) });
-    toast('已保存并生效');
-    await loadAll();
-    return true;
   } catch (e) {
     showErr(errEl, e.message);
     toast(e.message, true);
     return false;
   }
+  toast('已保存并生效');
+  // 刚改了安全入口时，后面的请求会因为旧票据失效被拦，交给页面跳转处理，不当作保存失败
+  try { await loadAll(); } catch (e) { /* 忽略 */ }
+  return true;
+}
+
+// 改了安全入口就跳到新地址，否则当前页面继续请求 /api 会一直 404。
+// 直接开面板端口（18080）进来的不跳——面板端口上本来就没有入口路径。
+function maybeJumpToEntry(before, after) {
+  const norm = s => ('/' + String(s || '').replace(/^\/+/, '').replace(/\/+$/, '')).replace(/\/$/, '');
+  const a = norm(before), b = norm(after);
+  if (a === b || !b) return false;
+  const adminPort = String((state.status && state.status.adminListen) || '').split(':').pop();
+  if (location.port === adminPort) return false;
+  toast('入口已修改，正在跳转到新入口…');
+  setTimeout(() => { location.href = location.protocol + '//' + location.host + b; }, 900);
+  return true;
 }
 
 /* ---------- 日志 ---------- */
@@ -725,7 +783,15 @@ $('#btnIssueACME').addEventListener('click', async () => {
 });
 
 /* 设置 */
-$('#btnSaveSettings').addEventListener('click', () => saveConfig(null, $('#setErr')));
+$('#btnSaveSettings').addEventListener('click', async () => {
+  const before = (state.config.security || {}).entryPath || '';
+  const next = $('#s-entry').value.trim();
+  if (await saveConfig(null, $('#setErr'))) maybeJumpToEntry(before, next);
+});
+
+$('#s-entry').addEventListener('input', renderEntryHint);
+$('#s-pubport').addEventListener('input', renderEntryHint);
+$('#btnGenEntry').addEventListener('click', randomEntry);
 
 $('#btnReloadCert').addEventListener('click', async () => {
   const ok = $('#setOk'), err = $('#setErr');

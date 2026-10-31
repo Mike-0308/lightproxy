@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.0.3"
+var version = "1.1.0"
 
 type App struct {
 	mu      sync.Mutex
@@ -213,41 +213,72 @@ func (a *App) Start() error {
 		}
 	}
 
+	// 先自己起监听，而不是让 http.Server 内部去 Listen：
+	// 开了 HTTPS 时要在这个端口上分辨「TLS 握手」和「明文 http://」，
+	// 明文那一头直接回 307 跳 https，省得用户手动改地址。
+	ln, lerr := net.Listen("tcp", cfg.Listen)
+	if lerr != nil {
+		a.logs.Errorf("反向代理监听 %s 失败: %v", cfg.Listen, lerr)
+	}
+
 	if a.tlsActive {
 		srv.TLSConfig = &tls.Config{
 			GetCertificate: a.certs.GetCertificate,
 			MinVersion:     tls.VersionTLS12,
 			NextProtos:     []string{"h2", "http/1.1"},
 		}
-		go func() {
-			a.logs.Infof("反向代理监听 %s（HTTPS）", cfg.Listen)
-			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				a.logs.Errorf("HTTPS 监听失败: %v", err)
-			}
-		}()
-
-		if cfg.TLS.HTTPListen != "" {
-			rs := &http.Server{
-				Addr:              cfg.TLS.HTTPListen,
-				Handler:           a.redirectHandler(),
-				ReadHeaderTimeout: 10 * time.Second,
-			}
-			servers = append(servers, rs)
+		if ln != nil {
+			sn := newConnSniffer(ln)
 			go func() {
-				a.logs.Infof("HTTP 跳转监听 %s", cfg.TLS.HTTPListen)
-				if err := rs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					if strings.Contains(err.Error(), "address already in use") {
-						a.logs.Errorf("HTTP 跳转监听 %s 失败：端口被占用（80 通常是路由器管理后台 uhttpd），换个高位端口或关掉 HTTP 跳转", cfg.TLS.HTTPListen)
-					} else {
-						a.logs.Errorf("HTTP 跳转监听失败: %v", err)
-					}
+				a.logs.Infof("反向代理监听 %s（HTTPS）", cfg.Listen)
+				if err := srv.Serve(tls.NewListener(sn.tlsListener(), srv.TLSConfig)); err != nil && !listenerClosed(err) {
+					a.logs.Errorf("HTTPS 监听失败: %v", err)
+				}
+			}()
+			plain := &http.Server{
+				Addr:              cfg.Listen,
+				Handler:           a.plainOnTLSHandler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       30 * time.Second,
+				MaxHeaderBytes:    16 << 10,
+			}
+			servers = append(servers, plain)
+			go func() {
+				if err := plain.Serve(sn.plainListener()); err != nil && !listenerClosed(err) {
+					a.logs.Errorf("HTTP 跳转监听失败: %v", err)
 				}
 			}()
 		}
-	} else {
+
+		if cfg.TLS.HTTPListen != "" {
+			switch {
+			case sameListenPort(cfg.TLS.HTTPListen, cfg.Listen):
+				// 和反代端口一样：这一层已经由同端口嗅探搞定，再起一个监听只会
+				// 报 address already in use，白让人以为跳转坏了。
+				a.logs.Infof("HTTP 跳转监听 %s 与反代同端口，已在同端口内自动识别 http:// 并跳转，无需单独监听", cfg.TLS.HTTPListen)
+			default:
+				rs := &http.Server{
+					Addr:              cfg.TLS.HTTPListen,
+					Handler:           a.redirectHandler(),
+					ReadHeaderTimeout: 10 * time.Second,
+				}
+				servers = append(servers, rs)
+				go func() {
+					a.logs.Infof("HTTP 跳转监听 %s", cfg.TLS.HTTPListen)
+					if err := rs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						if strings.Contains(err.Error(), "address already in use") {
+							a.logs.Errorf("HTTP 跳转监听 %s 失败：端口被占用（80 通常是路由器管理后台 uhttpd），留空即可（同端口会自动跳转），或换一个高位端口", cfg.TLS.HTTPListen)
+						} else {
+							a.logs.Errorf("HTTP 跳转监听失败: %v", err)
+						}
+					}
+				}()
+			}
+		}
+	} else if ln != nil {
 		go func() {
 			a.logs.Infof("反向代理监听 %s（HTTP）", cfg.Listen)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := srv.Serve(ln); err != nil && !listenerClosed(err) {
 				a.logs.Errorf("监听失败: %v", err)
 			}
 		}()
@@ -282,7 +313,37 @@ func (a *App) Start() error {
 	if am := a.acme.Load(); am != nil {
 		am.Start()
 	}
+	if cfg.Security.EntryPath != "" {
+		a.logs.Infof("安全入口已启用：外网访问需带上路径 %s（内网与本机不受限）", cfg.Security.EntryPath)
+	}
 	return nil
+}
+
+// listenerClosed 判断监听错误是不是「正常关闭」引起的，不该当错误刷日志。
+func listenerClosed(err error) bool {
+	return err == nil || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)
+}
+
+// sameListenPort 判断两个监听地址是不是同一个端口（忽略主机部分）。
+// ":8686" 与 "0.0.0.0:8686"、"[::]:8686" 都算同一个端口。
+func sameListenPort(a, b string) bool {
+	pa, pb := listenPort(a), listenPort(b)
+	return pa != "" && pa == pb
+}
+
+func listenPort(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		return port
+	}
+	// 只写了 ":8686" 这种也兜一下
+	if strings.HasPrefix(addr, ":") {
+		return strings.TrimPrefix(addr, ":")
+	}
+	return ""
 }
 
 // localForwardPorts 返回需要对外放行的本机端口（反代监听 + HTTP 跳转）。
@@ -325,10 +386,26 @@ func (a *App) applyForward(cfg *Config) error {
 	return a.forward.Apply(fc)
 }
 
-// proxyHandler 是反代入口：先过「只允许域名访问」的判断，再交给规则匹配。
+// proxyHandler 是反代入口：先过「安全入口」与「只允许域名访问」，再交给规则匹配。
 func (a *App) proxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := a.Config()
+		path, ok := cfg.entrySwitch(r)
+		if !ok {
+			denyEntry(w)
+			return
+		}
+		if path != r.URL.Path {
+			// 走的是安全入口：把前缀剥掉再按原规则匹配，
+			// 这样入口内的应用看到的仍然是 /、/api/... 这些它自己的路径。
+			r2 := *r
+			u := *r.URL
+			u.Path = path
+			u.RawPath = ""
+			r2.URL = &u
+			r = &r2
+			cfg.markEntryCookie(w, r)
+		}
 		if reason := cfg.allowProxyRequest(r); reason != "" {
 			denyHost(w, r, reason)
 			return
@@ -340,6 +417,49 @@ func (a *App) proxyHandler() http.Handler {
 		}
 		p.ServeHTTP(w, r)
 	})
+}
+
+// plainOnTLSHandler 处理「把 http:// 发到了 HTTPS 端口」的请求。
+// 浏览器会提示 Client sent an HTTP request to an HTTPS server.，
+// 这里直接把它 307 到同一端口的 https://，地址栏一个回车就能进去。
+// Host 是 IP 字面量时不跳转（证书签的是域名，跳过去只会报证书错误），
+// 按普通 HTTP 交给反代处理，内网用 IP 调试照样能用。
+func (a *App) plainOnTLSHandler() http.Handler {
+	proxy := a.proxyHandler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := a.Config()
+		if _, ok := cfg.entrySwitch(r); !ok {
+			denyEntry(w)
+			return
+		}
+		host, port := splitHost(r.Host)
+		if host == "" || isIPHost(host) {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		target := "https://" + host
+		switch {
+		case port != "" && port != "443":
+			// 客户端本来就是用这个端口连上来的，跳过去还用同一个端口
+			target += ":" + port
+		case port == "":
+			if p := cfg.TLS.PublicPort; p != 0 && p != 443 {
+				target += ":" + strconv.Itoa(p)
+			}
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		// 用原始 RequestURI：安全入口前缀要原样带过去，否则跳到 https 后又 404
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	})
+}
+
+// splitHost 拆出 Host 里的域名与端口，兼容 IPv6 字面量（[::1]:8443）。
+func splitHost(host string) (string, string) {
+	host = strings.TrimSpace(host)
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return strings.TrimSuffix(strings.Trim(h, "[]"), "."), p
+	}
+	return strings.TrimSuffix(strings.Trim(host, "[]"), "."), ""
 }
 
 // guardedAdmin 是管理面板入口：同样拦 IP 直连，允许经反代域名访问。
@@ -614,6 +734,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"security": map[string]any{
 			"requireDomain": cfg.Security.RequireDomain,
 			"allowLoopback": cfg.Security.AllowLoopback,
+			"entryPath":     cfg.Security.EntryPath,
 		},
 		"redirect":   cfg.TLS.Redirect,
 		"extraHosts": cfg.Security.ExtraHosts,

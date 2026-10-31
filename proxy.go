@@ -258,6 +258,7 @@ type certManager struct {
 	mu     sync.RWMutex
 	byName map[string]*tls.Certificate
 	def    *tls.Certificate
+	any    *tls.Certificate // 客户端不发 SNI 时（比如直接用 IP 访问）拿来握手，好让请求走到 403 页
 	names  []string
 	err    error
 
@@ -337,9 +338,17 @@ func (m *certManager) reload() error {
 	}
 	sort.Strings(names)
 
+	var any *tls.Certificate
+	if def != nil {
+		any = def
+	} else if len(names) > 0 {
+		any = byName[names[0]]
+	}
+
 	m.mu.Lock()
 	m.byName = byName
 	m.def = def
+	m.any = any
 	m.names = names
 	m.err = nil
 	m.mu.Unlock()
@@ -370,6 +379,11 @@ func (m *certManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certifica
 		return nil, errors.New("服务端未配置证书")
 	}
 	sni := strings.ToLower(strings.TrimSuffix(hello.ServerName, "."))
+	// 直接用 IP 访问时浏览器/客户端不会发 SNI：随便给一张证书先把握手完成，
+	// 后面「只允许域名访问」会回 403，比握手就直接失败（浏览器只报证书错误）更好懂。
+	if sni == "" && m.any != nil {
+		return m.any, nil
+	}
 	if c, ok := m.byName[sni]; ok {
 		return c, nil
 	}

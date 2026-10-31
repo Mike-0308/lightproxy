@@ -44,6 +44,7 @@
         <dt>反代入口</dt><dd id="ov-listen">—</dd>
         <dt>管理面板</dt><dd id="ov-admin">—</dd>
         <dt>HTTPS</dt><dd id="ov-tls">—</dd>
+        <dt>安全入口</dt><dd id="ov-entry">—</dd>
         <dt>版本 / 主机</dt><dd id="ov-ver">—</dd>
       </dl>
     </div>
@@ -278,11 +279,13 @@
       </div>
       <div class="form">
         <label class="row checks-inline"><span>HTTP 跳转</span>
-          <label class="chk"><input type="checkbox" id="s-redirect"> 访问 HTTP 时自动 301 到 HTTPS（仅域名访问跳转，IP 直连不跳转）</label>
+          <label class="chk"><input type="checkbox" id="s-redirect"> 访问 HTTP 时自动跳到 HTTPS（仅域名访问跳转，IP 直连不跳转；反代端口上的 http:// 始终会自动跳转）</label>
         </label>
-        <label class="row"><span>HTTP 监听地址</span><input id="s-httplisten" placeholder=":8686 之类的高位端口（留空则不启用）"></label>
+        <label class="row"><span>额外 HTTP 监听地址</span><input id="s-httplisten" placeholder="一般留空即可；只有想另开一个端口收 HTTP 时才填，如 :8080"></label>
       </div>
-      <p class="tip">公网端口填外网实际访问的 HTTPS 端口（例如反代监听 8686 并从外网 8686 进来，就填 8686），跳转时会带上它。<br>HTTP 监听地址留空时不启用 HTTP 入口：80 端口通常被路由器管理后台占用（会导致路由器 Web 打不开），家宽 80 一般也被运营商封，所以默认不占它。</p>
+      <p class="tip">公网端口填外网实际访问的 HTTPS 端口（例如反代监听 8686 并从外网 8686 进来，就填 8686），跳转时会带上它。<br>
+        浏览器里手抖写了 <code>http://域名:8686</code> 也没关系：反代端口会自己认出这是明文请求并跳到 <code>https://</code>，
+        <b>「额外 HTTP 监听地址」留空就行</b>。只有需要另开一个端口（比如能用的 80）收 HTTP 时才填，而且不要填成反代端口本身。</p>
     </div>
 
     <div class="card">
@@ -297,6 +300,23 @@
         <label class="row"><span>额外允许的域名</span><input id="s-extrahosts" placeholder="可留空，多个用逗号分隔"></label>
       </div>
       <p class="tip">面板端口（18080）不会写进防火墙放行名单，外网本来就够不着；这项开关是应用层的第二道保险。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>安全入口</h2><span class="hint" id="s-entry-url"></span></div>
+      <p class="tip">填一个只有你知道的路径，例如 <code>/x7k2m</code>。开启后<b>外网</b>必须访问
+        <code>https://你的域名:端口/x7k2m</code> 才能进，直接打开 <code>https://你的域名:端口/</code> 一律返回 404，
+        看起来就像这个端口上没有服务——端口扫描器扫到了也进不来。<br>
+        进过一次之后，浏览器会拿到一张 7 天有效的通行票据，页面里的 <code>/static</code>、<code>/api</code> 等资源照常加载，不用每次重输。
+        <b>内网与本机始终可以直接访问</b>，不会把自己锁在外面；改了路径旧票据立即失效。</p>
+      <div class="form">
+        <label class="row"><span>入口路径</span>
+          <input id="s-entry" placeholder="留空则不启用，例如 /x7k2m">
+        </label>
+      </div>
+      <div class="actions">
+        <button class="ghost sm" id="btnGenEntry">随机生成一个</button>
+      </div>
     </div>
 
     <div class="card">

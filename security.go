@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -117,4 +120,86 @@ func denyHost(w http.ResponseWriter, r *http.Request, reason string) {
 	w.WriteHeader(http.StatusForbidden)
 	host := requestHost(r)
 	fmt.Fprintf(w, "403 拒绝访问\n\n%s\n\n当前 Host: %s\n", reason, host)
+}
+
+// ---------------- 安全入口 ----------------
+//
+// 只允许域名访问解决了「IP 直连」，但域名本身是公开的（证书透明日志里就有），
+// 扫描器拿域名逐端口扫一样能撞到反代。安全入口再加一道：外网必须走
+// https://域名:端口/<入口>，直接访问域名根路径一律 404，看起来就像没服务。
+//
+// 内网/本机来源不受限制——在家用 IP 或内网域名直接访问仍然照常，不会把自己锁在外面。
+
+const entryCookieName = "lp_entry"
+
+// entrySwitch 判断请求能否通过安全入口，并返回剥离入口前缀后的路径。
+// ok=false 表示按「没有这个服务」处理（404）。
+func (c *Config) entrySwitch(r *http.Request) (path string, ok bool) {
+	p := r.URL.Path
+	entry := c.Security.EntryPath
+	if entry == "" {
+		return p, true
+	}
+	// 带上了入口路径：不管内外网都剥掉前缀，这样把外网链接贴到内网也能直接用
+	if p == entry || p == entry+"/" {
+		return "/", true
+	}
+	if strings.HasPrefix(p, entry+"/") {
+		return p[len(entry):], true
+	}
+	// 没带入口：内网与本机照常访问，免得在家把自己锁在外面
+	if isLANAddr(r.RemoteAddr) {
+		return p, true
+	}
+	// 从入口进来的浏览器会拿到一张票据，之后页面里的 /static、/api 之类的
+	// 绝对路径请求靠它放行，否则入口内的应用会白屏。
+	if c.entryCookieOK(r) {
+		return p, true
+	}
+	return p, false
+}
+
+// entryToken 由入口路径与面板账号派生，改入口或改密码后旧票据自动失效。
+func (c *Config) entryToken() string {
+	if c.Security.EntryPath == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("lightproxy-entry\x00" + c.Security.EntryPath + "\x00" + c.Admin.User + "\x00" + c.Admin.Pass))
+	return hex.EncodeToString(sum[:16])
+}
+
+func (c *Config) entryCookieOK(r *http.Request) bool {
+	want := c.entryToken()
+	if want == "" {
+		return false
+	}
+	ck, err := r.Cookie(entryCookieName)
+	if err != nil || ck.Value == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(ck.Value), []byte(want)) == 1
+}
+
+// markEntryCookie 在真正走进口的请求上种票据，有效期 7 天。
+func (c *Config) markEntryCookie(w http.ResponseWriter, r *http.Request) {
+	if c.Security.EntryPath == "" || c.entryCookieOK(r) {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     entryCookieName,
+		Value:    c.entryToken(),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+		MaxAge:   7 * 24 * 3600,
+	})
+}
+
+// denyEntry 对没走入入口的请求回一个最普通的 404，不暴露反向代理的存在。
+func denyEntry(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	fmt.Fprint(w, "404 page not found\n")
 }
