@@ -189,8 +189,21 @@ func (m *DDNSManager) run() error {
 	m.ipv4, m.ipv6 = v4, v6
 	m.mu.Unlock()
 
-	client := newAliyunClient(m.cfg.AccessKey, m.cfg.SecretKey, m.cfg.Insecure)
-	zones := m.resolveZones(client)
+	p, perr := newDNSProvider(m.cfg)
+	if perr != nil {
+		m.mu.Lock()
+		m.lastErr = perr.Error()
+		m.lastRun = time.Now()
+		m.mu.Unlock()
+		return perr
+	}
+	spec, ok := providerSpecOf(m.cfg.Provider)
+	direct := ok && spec.Direct
+
+	var zones []string
+	if !direct {
+		zones = m.resolveZones(p)
+	}
 	var errs []string
 
 	for _, r := range m.cfg.Records {
@@ -199,10 +212,13 @@ func (m *DDNSManager) run() error {
 		}
 		k := recKey(r)
 
-		// 允许「域名」栏直接写 *.example.com / home.example.com，这里统一拆成 zone + RR。
-		zone, rr := resolveRecord(r, zones)
-		if zone != r.Domain || rr != r.RR {
-			m.setState(k, func(s *RecordState) { s.Domain, s.RR = zone, rr })
+		zone, rr := r.Domain, r.RR
+		if !direct {
+			// 允许「域名」栏直接写 *.example.com / home.example.com，这里统一拆成 zone + RR。
+			zone, rr = resolveRecord(r, zones)
+			if zone != r.Domain || rr != r.RR {
+				m.setState(k, func(s *RecordState) { s.Domain, s.RR = zone, rr })
+			}
 		}
 
 		desired := v4
@@ -227,7 +243,7 @@ func (m *DDNSManager) run() error {
 
 		m.setState(k, func(s *RecordState) { s.Desired = desired })
 
-		if err := m.syncRecord(client, r, zone, rr, desired); err != nil {
+		if err := m.syncRecord(p, r, zone, rr, desired); err != nil {
 			m.setState(k, func(s *RecordState) {
 				s.State = "error"
 				s.Message = err.Error()
@@ -256,13 +272,13 @@ func (m *DDNSManager) run() error {
 }
 
 // resolveZones 拉取账号下的域名列表并缓存 10 分钟；失败时沿用旧缓存或返回 nil。
-func (m *DDNSManager) resolveZones(c *aliyunClient) []string {
+func (m *DDNSManager) resolveZones(p dnsProvider) []string {
 	m.zonesMu.Lock()
 	defer m.zonesMu.Unlock()
 	if len(m.zones) > 0 && time.Since(m.zonesAt) < 10*time.Minute {
 		return m.zones
 	}
-	list, err := c.ListDomains()
+	list, err := p.ListZones()
 	if err != nil {
 		if len(m.zones) > 0 {
 			return m.zones
@@ -307,18 +323,32 @@ func friendlyAPIError(err error, zone string) error {
 }
 
 // syncRecord 对比解析记录，必要时新增/更新。zone/rr 是已解析好的真实域名与主机记录。
-func (m *DDNSManager) syncRecord(c *aliyunClient, r DNSRecord, zone, rr, desired string) error {
-	sub := zone
-	if rr != "@" && rr != "" {
-		sub = rr + "." + zone
+// 所有服务商共用这一段逻辑，差异只在 dnsProvider 的实现里。
+func (m *DDNSManager) syncRecord(p dnsProvider, r DNSRecord, zone, rr, desired string) error {
+	k := recKey(r)
+
+	// DuckDNS / dynv6：一条 token 覆盖一条记录，不需要查询。
+	if dd, ok := p.(directDNS); ok {
+		note, err := dd.SetDirect(zone, r.Type, desired)
+		if err != nil {
+			return err
+		}
+		m.setState(k, func(s *RecordState) {
+			s.Current = desired
+			s.State = "updated"
+			s.Message = note
+			s.UpdatedAt = time.Now()
+		})
+		m.logs.Infof("DDNS %s %s 已推送 -> %s", zone, r.Type, desired)
+		return nil
 	}
 
-	existing, err := c.DescribeSubDomain(sub, r.Type)
+	existing, err := p.Records(zone, rr, r.Type)
 	if err != nil {
-		return fmt.Errorf("查询解析记录失败: %w", friendlyAPIError(err, zone))
+		return fmt.Errorf("查询解析记录失败: %w", err)
 	}
 
-	var hit *aliyunRecord
+	var hit *dnsHit
 	for i := range existing {
 		e := &existing[i]
 		if e.Type != r.Type {
@@ -330,33 +360,25 @@ func (m *DDNSManager) syncRecord(c *aliyunClient, r DNSRecord, zone, rr, desired
 		}
 	}
 
-	k := recKey(r)
 	if hit == nil {
 		ttl := r.TTL
 		if ttl <= 0 {
 			ttl = m.cfg.TTL
 		}
-		if _, err := c.AddRecord(zone, rr, r.Type, desired, ttl); err != nil {
-			if ae, ok := err.(*APIError); ok && ae.Code == "DomainRecordDuplicate" {
-				// 并发或缓存过期导致重复，回查一次再更新
-				if recs, e2 := c.DescribeSubDomain(sub, r.Type); e2 == nil {
-					for i := range recs {
-						if recs[i].Type == r.Type && strings.EqualFold(recs[i].RR, rr) {
-							hit = &recs[i]
-							break
-						}
+		if _, err := p.Create(zone, rr, r.Type, desired, ttl); err != nil {
+			// 并发或缓存过期造成的重复：回查一次，能查到就走更新
+			if recs, e2 := p.Records(zone, rr, r.Type); e2 == nil {
+				for i := range recs {
+					if recs[i].Type == r.Type && strings.EqualFold(recs[i].RR, rr) {
+						hit = &recs[i]
+						break
 					}
 				}
-				if hit == nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("新增解析记录失败: %w", friendlyAPIError(err, zone))
+			}
+			if hit == nil {
+				return fmt.Errorf("新增解析记录失败: %w", err)
 			}
 		} else {
-			m.mu.Lock()
-			m.cache[k] = ""
-			m.mu.Unlock()
 			m.setState(k, func(s *RecordState) {
 				s.Current = desired
 				s.State = "added"
@@ -369,9 +391,6 @@ func (m *DDNSManager) syncRecord(c *aliyunClient, r DNSRecord, zone, rr, desired
 	}
 
 	if hit.Value == desired {
-		m.mu.Lock()
-		m.cache[k] = hit.RecordID
-		m.mu.Unlock()
 		m.setState(k, func(s *RecordState) {
 			s.Current = hit.Value
 			s.State = "ok"
@@ -385,12 +404,9 @@ func (m *DDNSManager) syncRecord(c *aliyunClient, r DNSRecord, zone, rr, desired
 	if ttl <= 0 {
 		ttl = m.cfg.TTL
 	}
-	if err := c.UpdateRecord(hit.RecordID, hit.RR, hit.Type, desired, ttl); err != nil {
-		return fmt.Errorf("更新解析记录失败: %w", friendlyAPIError(err, zone))
+	if err := p.Update(*hit, desired, ttl); err != nil {
+		return fmt.Errorf("更新解析记录失败: %w", err)
 	}
-	m.mu.Lock()
-	m.cache[k] = hit.RecordID
-	m.mu.Unlock()
 	old := hit.Value
 	m.setState(k, func(s *RecordState) {
 		s.Current = desired
@@ -442,11 +458,18 @@ func (m *DDNSManager) Snapshot() DDNSStatus {
 }
 
 func (m *DDNSManager) TestCredentials() (int, error) {
-	if m.cfg.AccessKey == "" || m.cfg.SecretKey == "" {
-		return 0, errors.New("未填写 AccessKey")
+	spec, ok := providerSpecOf(m.cfg.Provider)
+	if ok && spec.NeedSec && strings.TrimSpace(m.cfg.SecretKey) == "" {
+		return 0, errors.New("未填写 AccessKey Secret")
 	}
-	c := newAliyunClient(m.cfg.AccessKey, m.cfg.SecretKey, m.cfg.Insecure)
-	return c.TestCredentials()
+	p, err := newDNSProvider(m.cfg)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(m.cfg.AccessKey) == "" {
+		return 0, errors.New("未填写密钥")
+	}
+	return p.Test()
 }
 
 // ---------------- 公网 IP 探测 ----------------

@@ -8,6 +8,7 @@ const state = {
   status: null,
   editIndex: -1,
   tab: 'overview',
+  providers: [],
 };
 
 /* ---------- 小工具 ---------- */
@@ -86,6 +87,7 @@ async function loadAll() {
 function fillForms() {
   const c = state.config, d = c.ddns || {};
   $('#d-enable').checked = !!d.enable;
+  $('#d-provider').value = d.provider || 'aliyun';
   $('#d-ak').value = d.accessKeyId || '';
   $('#d-sk').value = d.accessKeySecret || '';
   $('#d-mode').value = d.ipMode || 'api';
@@ -93,6 +95,7 @@ function fillForms() {
   $('#d-interval').value = d.interval || 300;
   $('#d-ttl').value = d.ttl || 600;
   $('#d-sources').value = (d.ipSources || []).join('\n');
+  applyProviderUI();
 
   const t = c.tls || {}, a = c.admin || {}, rt = c.runtime || {};
   $('#s-listen').value = c.listen || '';
@@ -415,19 +418,73 @@ function renderACME() {
   $('#acmeStatus').innerHTML = rows.join('');
 }
 
+/* ---------- DDNS 服务商 ---------- */
+
+async function loadProviders() {
+  try {
+    const d = await api('/api/ddns/providers');
+    state.providers = d.providers || [];
+  } catch (e) {
+    state.providers = [];
+  }
+  const sel = $('#d-provider');
+  const cur = sel.value;
+  sel.innerHTML = state.providers.map(p =>
+    `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  if (cur) sel.value = cur;
+}
+
+function currentProvider() {
+  const id = ($('#d-provider') && $('#d-provider').value) || 'aliyun';
+  return state.providers.find(p => p.id === id) ||
+    { id, name: id, keyLabel: 'AccessKey ID', keyPlaceholder: '', secLabel: 'AccessKey Secret', secPlaceholder: '', needSecret: true, direct: false, hint: '', docs: '' };
+}
+
+function applyProviderUI() {
+  const p = currentProvider();
+  $('#d-ak-lbl').textContent = p.keyLabel || '密钥';
+  $('#d-ak').placeholder = p.keyPlaceholder || '';
+  $('#d-sk-row').classList.toggle('hidden', !p.needSecret);
+  if (p.needSecret) {
+    $('#d-sk-lbl').textContent = p.secLabel || 'Secret';
+    $('#d-sk').placeholder = p.secPlaceholder || '';
+  }
+  $('#d-hint').innerHTML = esc(p.hint || '选择域名托管在哪家服务商，把密钥填进来即可。');
+  const docs = $('#d-docs');
+  if (p.docs) {
+    docs.href = p.docs;
+    docs.classList.remove('hidden');
+  } else {
+    docs.classList.add('hidden');
+  }
+  if (p.direct) {
+    $('#d-rectip').innerHTML = p.id === 'duckdns'
+      ? '域名栏填子域名（如 <code>myhome</code>，不用写 <code>.duckdns.org</code>），主机记录保持 <code>@</code>；DuckDNS 每个子域名只维护一条 A / AAAA。'
+      : '域名栏填完整域名（如 <code>myhome.dynv6.net</code>），主机记录保持 <code>@</code>；dynv6 对 IPv6 支持最好。';
+  } else {
+    $('#d-rectip').innerHTML = '「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。' +
+      '也可以直接在域名栏写完整域名 <code>*.example.com</code>，保存时会自动拆开。';
+  }
+  renderRecords();
+}
+
 /* ---------- DDNS 记录 ---------- */
 
 function renderRecords() {
   const recs = (state.config.ddns && state.config.ddns.records) || [];
   const wrap = $('#recList');
+  const p = currentProvider();
+  const domainPH = p.direct
+    ? (p.id === 'duckdns' ? 'myhome' : 'myhome.dynv6.net')
+    : 'example.com';
   if (!recs.length) {
-    wrap.innerHTML = '<p class="empty">还没有记录。域名需已托管在阿里云解析。</p>';
+    wrap.innerHTML = `<p class="empty">还没有记录。${p.direct ? '填一个已经在 ' + esc(p.name) + ' 注册的主机名即可。' : '域名需已托管在' + esc(p.name) + '。'}</p>`;
     return;
   }
   wrap.innerHTML = recs.map((r, i) => `
     <div class="rec" data-i="${i}">
-      <input class="rec-domain" value="${esc(r.domain)}" placeholder="example.com">
-      <input class="rec-rr" value="${esc(r.rr || '@')}" placeholder="@ 或 * 或 home">
+      <input class="rec-domain" value="${esc(r.domain)}" placeholder="${esc(domainPH)}">
+      <input class="rec-rr" value="${esc(r.rr || '@')}" placeholder="@ 或 * 或 home"${p.direct ? ' disabled' : ''}>
       <select class="rec-type">
         <option value="A"${(r.type || 'A') === 'A' ? ' selected' : ''}>A</option>
         <option value="AAAA"${r.type === 'AAAA' ? ' selected' : ''}>AAAA</option>
@@ -438,7 +495,13 @@ function renderRecords() {
 
 function syncRecords(c) {
   const old = (state.config.ddns && state.config.ddns.records) || [];
-  c.ddns.records = $$('#recList .rec').map(row => {
+  const rows = $$('#recList .rec');
+  if (!rows.length) {
+    // 列表为空时不要清掉已有记录（可能是还没渲染出来的首次加载）
+    c.ddns.records = c.ddns.records || [];
+    return;
+  }
+  c.ddns.records = rows.map(row => {
     const base = Object.assign({}, old[+row.dataset.i] || {});
     base.domain = row.querySelector('.rec-domain').value.trim().toLowerCase();
     base.rr = row.querySelector('.rec-rr').value.trim() || '@';
@@ -632,7 +695,7 @@ function collectConfig() {
   c.ddns.interval = +$('#d-interval').value || 300;
   c.ddns.ttl = +$('#d-ttl').value || 600;
   c.ddns.ipSources = $('#d-sources').value.split(/[\n,，\s]+/).map(s => s.trim()).filter(Boolean);
-  c.ddns.provider = 'aliyun';
+  c.ddns.provider = $('#d-provider').value || 'aliyun';
   syncRecords(c);
 
   // 监听 / 面板 / 运行时
@@ -808,19 +871,29 @@ $('#recList').addEventListener('click', e => {
 
 $('#btnSaveDDNS').addEventListener('click', () => saveConfig(null, $('#ddnsErr')));
 
+// 换服务商时先把手填的记录收回 state，再按新服务商重绘（否则输入框会丢内容）
+$('#d-provider').addEventListener('change', () => {
+  if (state.config) syncRecords(state.config);
+  applyProviderUI();
+});
+
 $('#btnTestAK').addEventListener('click', async () => {
   const ok = $('#ddnsOk'), err = $('#ddnsErr');
   hide(ok); hide(err);
+  const p = currentProvider();
   try {
     const d = await api('/api/ddns/test', {
       method: 'POST',
       body: JSON.stringify({
+        provider: $('#d-provider').value,
         accessKeyId: $('#d-ak').value.trim(),
         accessKeySecret: $('#d-sk').value.trim(),
       }),
     });
     if (!d.ok) throw new Error(d.error || '验证失败');
-    ok.textContent = 'AccessKey 有效，账号下共 ' + d.domains + ' 个域名';
+    ok.textContent = d.domains > 0
+      ? p.name + ' 密钥有效，账号下共 ' + d.domains + ' 个域名'
+      : p.name + ' 密钥有效';
     ok.classList.remove('hidden');
   } catch (e) { showErr(err, e.message); }
 });
@@ -1107,8 +1180,13 @@ setInterval(() => {
 const TABS = ['overview', 'proxy', 'forward', 'ddns', 'acme', 'wol', 'term', 'logs', 'settings'];
 
 // 等 term.js 加载完再切初始页：hash 直接指到「终端」时 switchTab 会用到 TermUI
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const initial = location.hash.slice(1);
   if (TABS.includes(initial)) switchTab(initial);
-  loadAll().catch(e => toast('加载失败：' + e.message, true));
+  try {
+    await loadProviders();
+    await loadAll();
+  } catch (e) {
+    toast('加载失败：' + e.message, true);
+  }
 });

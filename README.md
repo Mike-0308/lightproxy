@@ -2,12 +2,12 @@
 
 **许可证：MIT** —— 可自由使用、修改、商用、再分发，保留版权声明即可（详见文末 License）。
 
-给内存吃紧的路由器用的 **反向代理 + 端口转发 + 阿里云 DDNS + 自动证书 + 网络唤醒 + Web 终端**。软件为本人自用，让AI针对小米CR8808设计，其它机型未经测试，发现的友友可以自测。
+给内存吃紧的路由器用的 **反向代理 + 端口转发 + DDNS（8 家服务商）+ 自动证书 + 网络唤醒 + Web 终端**。软件为本人自用，让AI针对小米CR8808设计，其它机型未经测试，发现的友友可以自测。
 
-- 单文件，静态链接：约 7.3MB（armv7），五个架构合计约 39MB
+- 单文件，静态链接：约 7.3MB（armv7），五个架构合计约 38MB
 - 常驻内存实测 17~22MB，空闲时更低（40 条并发连接时约 +2.6MB；不打开终端时新功能零开销）
 - 自带 Web 管理面板，配置热更新，改规则不用重启
-- 业务代码纯 Go 标准库实现（阿里云签名照官方算法手写，单元测试与官方 SDK 逐字节对拍）；
+- 业务代码纯 Go 标准库实现（八家 DNS 的签名全部照官方算法手写，阿里云签名有单元测试与官方 SDK 逐字节对拍）；
   唯一的第三方依赖是 `golang.org/x/crypto/ssh`（Web 终端的 SSH 客户端，约 340KB），WOL、WebSocket、PTY 全部手写
 
 为小内存路由器（256MB 级别）设计，兼容任何有 SSH 的 Linux 设备。
@@ -82,12 +82,14 @@
 - 证书自动保存在安装目录的 `certs/`（如 `/data/lightproxy/certs`），不用填目录；签发后自动热加载，后台每小时巡检，剩余有效期低于阈值（默认 30 天）自动续
 - 「检查配置」可提前验证 AccessKey 与每个域名能否找到解析，避免签发一半才失败
 
-**DDNS（阿里云）**
+**DDNS（8 家服务商）**
+- 支持阿里云、腾讯云 DNSPod、华为云、百度智能云、火山引擎、Cloudflare、DuckDNS、dynv6，面板里下拉切换
 - A / AAAA 记录，多条域名；支持泛解析（`*`）与多级前缀
 - 「域名」栏可以直接写 `*.example.com` 这样的完整域名，保存时自动拆成主域名 + 主机记录
+- DuckDNS / dynv6 这类免费服务只需要一个 token，域名栏填主机名即可
 - 公网 IP 两种获取方式：在线接口查询（默认）/ 读网卡地址（PPPoE 拨号）
-- 值没变不写 API，只在变化时新增/更新（对阿里云接口零浪费）
-- 「测试 AccessKey」「检测公网 IP」「立即同步」一键排查
+- 值没变不写 API，只在变化时新增/更新（不对接口做无谓写入）
+- 「测试密钥」「检测公网 IP」「立即同步」一键排查
 
 **管理面板**（默认 `http://路由器IP:18080/`）
 - 概览：运行时长、内存、请求计数，反代/DDNS/端口转发/证书四块状态一屏看完
@@ -264,12 +266,27 @@ iptables -A INPUT -p tcp -m multiport --dports 16666,8443 -j ACCEPT
 
 ## 配置 DDNS
 
-1. 阿里云控制台 → RAM 访问控制 → 创建子用户，**只授予 `AliyunDNSFullAccess`**，生成 AccessKey
-2. 面板 → DDNS → 填 AccessKey ID / Secret → 添加记录（主域名 `example.com`，主机记录 `home` 或 `*`，类型 `A`）
-3. 「测试 AccessKey」确认密钥可用 → 「检测公网 IP」确认能拿到地址 → 保存
+面板 → DDNS → 选服务商 → 填密钥 → 添加记录 → 保存。各家要填的东西：
+
+| 服务商 | 密钥 | 备注 |
+|---|---|---|
+| 阿里云解析 | AccessKey ID + Secret | RAM 子账号，只给 `AliyunDNSFullAccess` |
+| 腾讯云 DNSPod | SecretId + SecretKey | 云 API 密钥；子账号给 `QcloudDNSPodFullAccess` |
+| 华为云 DNS | Access Key ID + Secret | 我的凭证 → 访问密钥；DNS FullAccess |
+| 百度智能云 DNS | AccessKey ID + Secret | 安全认证 → AccessKey |
+| 火山引擎 TrafficRoute | Access Key ID + Secret | 访问控制 → 密钥管理；DNS 读写 |
+| Cloudflare | API Token | 用 API 令牌（Zone → DNS → Edit），不要用 Global Key |
+| DuckDNS | Token | 域名栏填 `myhome`（不用写 `.duckdns.org`） |
+| dynv6 | HTTP Token | 域名栏填 `myhome.dynv6.net`，IPv6 首选 |
+
+1. 到上表对应的控制台建一个只含 DNS 权限的密钥
+2. 面板填密钥 → 添加记录（主域名 `example.com`，主机记录 `home` 或 `*`，类型 `A`）
+3. 「测试密钥」确认可用 → 「检测公网 IP」确认能拿到地址 → 保存
 4. 等一个检测周期，或点「立即同步」
 
 PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6，IP 获取方式选「读取网卡地址」并填 `pppoe-wan`。
+
+自动证书（DNS-01）目前仍只走阿里云解析，和 DDNS 的服务商选择无关。
 
 ## 配置 HTTPS
 
@@ -325,6 +342,7 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 | `forward.rules[].proto` | `tcp` / `udp` / `both` |
 | `forward.rules[].port` | 外网端口；同协议同端口不可重复 |
 | `forward.rules[].toHost` | 目标 IPv4（内核 DNAT 不做域名解析） |
+| `ddns.provider` | `aliyun` / `tencent` / `huawei` / `baidu` / `volcengine` / `cloudflare` / `duckdns` / `dynv6` |
 | `ddns.interval` | 检测间隔秒数，最小 60 |
 | `ddns.ipMode` | `api` 在线查询 / `interface` 读网卡 |
 | `runtime.memLimitMB` | Go 堆软上限，默认 32；内存紧张可降到 24 |
@@ -346,10 +364,12 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 |---|---|
 | 面板打不开 | `netstat -lntp \| grep 18080` 看端口；`/data/lightproxy/ctl status` 看进程；`console.log` 看报错 |
 | 重启路由后服务没起来 | `/data/lightproxy/ctl verify` 看哪些自启挂钩还在、启动卡在哪；`ctl start` 手动拉起 |
-| DDNS 报 SignatureDoesNotMatch | 路由器时钟不准，确认 NTP 已同步（签名对时间敏感） |
-| DDNS 报 InvalidAccessKeyId | AccessKey 填错或被禁用 |
-| DDNS 报 InvalidDomainName.NoExist | 「域名」栏要填**主域名**（如 `example.com`），泛解析把 `*` 填在「主机记录」栏；也可以直接在域名栏写 `*.example.com`，保存时自动拆分 |
-| 域名解析不生效 | `nslookup home.example.com` 看 TTL；阿里云解析页确认记录值 |
+| DDNS 报 SignatureDoesNotMatch / IamSignatureInvalid | 路由器时钟不准，确认 NTP 已同步（各家签名都对时间敏感） |
+| DDNS 报 AccessKey 无效 | 密钥填错、被禁用，或子账号没有 DNS 权限 |
+| DDNS 报「账号里没有域名」 | 「域名」栏要填**主域名**（如 `example.com`），泛解析把 `*` 填在「主机记录」栏；也可以直接在域名栏写 `*.example.com`，保存时自动拆分。域名还必须已托管在该服务商 |
+| DDNS 报 InvalidAction | 腾讯云密钥不是云 API 密钥，或服务未开通 DNSPod |
+| DuckDNS / dynv6 报拒绝更新 | 域名栏只填主机名（DuckDNS 填 `myhome`，dynv6 填 `myhome.dynv6.net`），token 在对应站点复制 |
+| 域名解析不生效 | `nslookup home.example.com` 看 TTL；到对应服务商的解析页确认记录值 |
 | 端口转发报「iptables 不可用」 | 用 root 运行；或 `forward.backend` 改 `nftables` 试试 |
 | 端口转发下发失败已回滚 | 看「生效状态」里的错误详情；确认目标 IP 可 ping、外网端口没被系统占用 |
 | 转发规则重启后丢了 | 看「生效状态」的持久化说明；一般由 `/etc/config/firewall` 的 `lightproxy_fw` include 恢复，cron 每 2 分钟兜底 |
@@ -386,8 +406,15 @@ lightproxy/
 ├── tcpfwd.go          IPv6 用户态裸 TCP/UDP 转发（跨协议族映射到内网 IPv4）
 ├── knock.go           转发端口的敲门放行名单（来源 /64，7 天有效）
 ├── acme.go            ACME v2 客户端（DNS-01，ES256 手写 JWS）+ 自动续期
-├── ddns.go            DDNS 调度与公网 IP 探测
-├── aliyun.go          阿里云 DNS 客户端（RPC 签名 v1）
+├── ddns.go            DDNS 调度与公网 IP 探测（与服务商无关的同步逻辑）
+├── dns.go             服务商抽象接口 + 公共签名工具 + 面板用的服务商清单
+├── aliyun.go          阿里云 DNS（RPC 签名 v1）
+├── tencent.go         腾讯云 DNSPod（TC3-HMAC-SHA256）
+├── huawei.go          华为云 DNS（SDK-HMAC-SHA256）
+├── baidu.go           百度智能云 DNS（bce-auth-v1）
+├── volc.go            火山引擎 TrafficRoute（HMAC-SHA256）
+├── cloudflare.go      Cloudflare（API Token）
+├── dnsfree.go         DuckDNS / dynv6（单 token 覆盖式更新）
 ├── admin.go           管理面板 API 与会话
 ├── wol.go             网络唤醒：魔术包构造与发送
 ├── term.go            终端会话管理：回放缓冲、接回、保活回收
@@ -426,13 +453,15 @@ lightproxy/
 
 ### 二进制
 
-| 架构 | v1.3.0（无终端） | v1.4.0（含 WOL + 终端） |
-|---|---|---|
-| linux/armv7 | 6,946,968 B | 7,536,792 B（7.2MB，+576KB） |
-| linux/arm64 | 7,143,576 B | 7,405,720 B |
-| linux/amd64 | 7,205,016 B | 7,774,360 B（7.4MB） |
-| linux/mipsle | 7,930,039 B | 8,519,863 B（8.1MB） |
-| windows/amd64 | 7.2MB | 7.6MB |
+| 架构 | v1.3.0（无终端） | v1.4.0（含 WOL + 终端） | v1.5.0（含 8 家 DDNS） |
+|---|---|---|---|
+| linux/armv7 | 6,946,968 B | 7,536,792 B（7.2MB，+576KB） | 7,667,864 B（+131KB） |
+| linux/arm64 | 7,143,576 B | 7,405,720 B | 7,602,328 B |
+| linux/amd64 | 7,205,016 B | 7,774,360 B（7.4MB） | 7,934,104 B（+160KB） |
+| linux/mipsle | 7,930,039 B | 8,519,863 B（8.1MB） | 8,650,935 B（+131KB） |
+| windows/amd64 | 7.2MB | 7.6MB | 7.8MB |
+
+v1.5.0 的增量就是 7 家新服务商的适配层：每家 4 个 HTTP 接口 + 一份手写签名，合计约 150KB（armv7），没有引入任何 SDK 依赖。常量表、JSON 结构、错误翻译都是纯代码，Go 编译器会把用不到的部分裁掉。
 
 增量构成：SSH 客户端约 340KB、WebSocket/PTY/会话管理约 25KB、终端页前端脚本约 30KB（随二进制 embed）、其余是 x/crypto 的间接依赖。
 

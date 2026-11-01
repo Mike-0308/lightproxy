@@ -202,13 +202,15 @@
   <section id="tab-ddns" class="tab hidden">
     <div class="card">
       <div class="card-hd">
-        <h2>阿里云 DDNS</h2>
+        <h2>DDNS 动态域名</h2>
         <label class="switch"><input type="checkbox" id="d-enable"><span></span>启用</label>
       </div>
-      <p class="tip">只支持阿里云解析（AliDNS）。AccessKey 建议用子账号并只授予 <code>AliyunDNSFullAccess</code>。</p>
+      <p class="tip" id="d-hint">选择域名托管在哪家服务商，把密钥填进来即可。</p>
       <div class="form grid2">
-        <label class="row"><span>AccessKey ID</span><input id="d-ak" autocomplete="off" placeholder="LTAI..."></label>
-        <label class="row"><span>AccessKey Secret</span><input id="d-sk" type="password" autocomplete="new-password" placeholder="********"></label>
+        <label class="row"><span>服务商</span><select id="d-provider"></select></label>
+        <label class="row"><span>密钥申请</span><a class="link" id="d-docs" target="_blank" rel="noreferrer">控制台 →</a></label>
+        <label class="row"><span id="d-ak-lbl">AccessKey ID</span><input id="d-ak" autocomplete="off" placeholder="LTAI..."></label>
+        <label class="row" id="d-sk-row"><span id="d-sk-lbl">AccessKey Secret</span><input id="d-sk" type="password" autocomplete="new-password" placeholder="********"></label>
         <label class="row"><span>IP 获取方式</span>
           <select id="d-mode">
             <option value="api">在线接口查询（推荐）</option>
@@ -222,14 +224,14 @@
       </div>
 
       <h3 class="sub">解析记录</h3>
-      <p class="tip">「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。
+      <p class="tip" id="d-rectip">「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。
         也可以直接在域名栏写完整域名 <code>*.example.com</code>，保存时会自动拆开。</p>
       <div id="recList" class="rec-list"></div>
       <button class="ghost sm" id="btnAddRec">+ 添加记录</button>
 
       <div class="actions wrap">
         <button class="primary" id="btnSaveDDNS">保存并生效</button>
-        <button class="ghost" id="btnTestAK">测试 AccessKey</button>
+        <button class="ghost" id="btnTestAK">测试密钥</button>
         <button class="ghost" id="btnDetectIP">检测公网 IP</button>
         <button class="ghost" id="btnRunDDNS">立即同步</button>
       </div>

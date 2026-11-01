@@ -471,6 +471,7 @@ func (c *Config) Normalize() error {
 	}
 
 	d := &c.DDNS
+	d.Provider = normalizeProvider(d.Provider)
 	if d.Provider == "" {
 		d.Provider = "aliyun"
 	}
@@ -483,12 +484,16 @@ func (c *Config) Normalize() error {
 	if d.IPMode == "" {
 		d.IPMode = "api"
 	}
+	spec, specOK := providerSpecOf(d.Provider)
 	if d.Enable {
-		if d.Provider != "aliyun" {
-			return fmt.Errorf("DDNS 目前只支持 aliyun")
+		if !specOK {
+			return fmt.Errorf("不支持的 DNS 服务商: %s", d.Provider)
 		}
-		if strings.TrimSpace(d.AccessKey) == "" || strings.TrimSpace(d.SecretKey) == "" {
-			return fmt.Errorf("启用 DDNS 需要填写 AccessKey ID 与 Secret")
+		if strings.TrimSpace(d.AccessKey) == "" {
+			return fmt.Errorf("启用 DDNS 需要填写 %s", spec.KeyLbl)
+		}
+		if spec.NeedSec && strings.TrimSpace(d.SecretKey) == "" {
+			return fmt.Errorf("启用 DDNS 需要填写 %s", spec.SecLbl)
 		}
 		if len(d.Records) == 0 {
 			return fmt.Errorf("启用 DDNS 但没有任何域名记录")
@@ -508,8 +513,13 @@ func (c *Config) Normalize() error {
 		if r.Type != "A" && r.Type != "AAAA" {
 			return fmt.Errorf("记录 %s.%s 的类型只能是 A 或 AAAA", r.RR, r.Domain)
 		}
-		if r.Domain == "" || !strings.Contains(r.Domain, ".") {
-			return fmt.Errorf("第 %d 条记录的域名无效: %q", i+1, r.Domain)
+		if r.Domain == "" {
+			return fmt.Errorf("第 %d 条记录没有填域名", i+1)
+		}
+		// DuckDNS / dynv6 是「一条 token 一条记录」，域名栏填的就是完整主机名，
+		// 不带点也合法（如 myhome）；其余服务商必须填已托管的主域名。
+		if specOK && !spec.Direct && !strings.Contains(r.Domain, ".") {
+			return fmt.Errorf("第 %d 条记录的域名无效: %q（需要填已托管的主域名，如 example.com）", i+1, r.Domain)
 		}
 	}
 	if d.IPMode == "interface" && strings.TrimSpace(d.Interface) == "" && !d.Enable {
