@@ -148,7 +148,11 @@ func detectFirewall(prefer string) (fwTool, error) {
 // ---------------- iptables 查询辅助 ----------------
 
 func iptArgs(table string, rest ...string) []string {
-	out := make([]string, 0, len(rest)+2)
+	out := make([]string, 0, len(rest)+4)
+	// fw3/fw4 重载时会持有 xtables 锁，此时直接下发会报 "Another app is currently
+	// holding the xtables lock" 并触发整体回滚（开机时程序正是被 fw3 拉起的，
+	// 撞锁概率极高）。-w 5 表示最多等 5 秒，拿不到锁才失败。
+	out = append(out, "-w", "5")
 	if table != "" {
 		out = append(out, "-t", table)
 	}

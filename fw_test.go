@@ -325,3 +325,15 @@ func TestPersistScriptOpensLocalPortsIPv6(t *testing.T) {
 		t.Error("没有本机端口时不该生成 IPv6 放行")
 	}
 }
+
+// 开机时程序是被 fw3 的 include 拉起来的，fw3 自己持着 xtables 锁，
+// 不带 -w 会直接失败并回滚，所以参数里必须带锁等待。
+func TestIptArgsWaitForLock(t *testing.T) {
+	got := strings.Join(iptArgs("nat", "-S", "LP_FWD"), " ")
+	if want := "-w 5 -t nat -S LP_FWD"; got != want {
+		t.Fatalf("iptArgs = %q，期望 %q", got, want)
+	}
+	if got := strings.Join(iptArgs("", "-F", "LP_ACL"), " "); got != "-w 5 -F LP_ACL" {
+		t.Fatalf("无 table 时 iptArgs = %q", got)
+	}
+}
