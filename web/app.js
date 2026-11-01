@@ -183,6 +183,29 @@ function randomEntry() {
 }
 
 /* ---------- 概览 ---------- */
+/* ---------- 证书状态 ---------- */
+
+// 多域名证书的域名清单：优先用证书里的 SAN 列表，老证书退回 Subject。
+// 以前只显示 Subject（= 证书里的第一个域名），第二个域名看不出来签没签上。
+function certNameList(st) {
+  if (st.sans && st.sans.length) return st.sans;
+  return st.subject ? [st.subject] : [];
+}
+
+// 「a、b、c」这种一行展示，超过 3 个折成「前 3 个等 N 个域名」。
+function certNameLine(st) {
+  const names = certNameList(st);
+  if (!names.length) return '';
+  if (names.length <= 3) return names.join('、');
+  return names.slice(0, 3).join('、') + ' 等 ' + names.length + ' 个域名';
+}
+
+// 已加载证书和自动证书谁先拿到到期时间就用谁的。
+function certExpireText(s) {
+  const t = s.tlsInfo.notAfter || (s.acme && s.acme.notAfter) || '';
+  return t ? ' · 到期 ' + t : '';
+}
+
 function renderOverview() {
   const s = state.status;
   if (!s) return;
@@ -193,7 +216,7 @@ function renderOverview() {
   $('#ov-listen').textContent = s.listen + (s.tls ? '（HTTPS）' : '（HTTP）');
   $('#ov-admin').textContent = 'http://' + s.adminListen + (s.tls ? '（明文，建议只在内网）' : '');
   $('#ov-tls').textContent = s.tls
-    ? '已启用 · ' + (s.tlsInfo.count || 0) + ' 张证书' + (s.tlsInfo.notAfter ? ' · 到期 ' + s.tlsInfo.notAfter : '')
+    ? '已启用 · ' + (s.tlsInfo.count || 0) + ' 张证书' + certExpireText(s)
     : '未启用';
   $('#ov-ver').textContent = 'v' + s.version + ' · ' + s.hostname;
   $('#ov-restart').textContent = s.needRestart ? '有改动待重启生效' : '';
@@ -236,7 +259,11 @@ function renderOverview() {
   if (ac.issuing) {
     $('#ov-acme').innerHTML = `<div class="mini-row"><span class="dot warn"></span><div class="grow"><div>正在签发</div><div class="mono">${esc(ac.stage || '准备中')}</div></div></div>`;
   } else if (ac.notAfter) {
-    $('#ov-acme').innerHTML = `<div class="mini-row"><span class="dot ok"></span><div class="grow"><div>证书有效${ac.subject ? ' · ' + esc(ac.subject) : ''}</div><div class="mono">到期 ${esc(ac.notAfter)}</div></div></div>`;
+    const names = certNameLine(ac);
+    const miss = (ac.missing && ac.missing.length)
+      ? `<div class="mini-row"><span class="dot warn"></span><div class="grow"><div>${ac.missing.length} 个域名还没生效</div><div class="mono">${esc(ac.missing.join('、'))} · 需重新签发</div></div></div>`
+      : '';
+    $('#ov-acme').innerHTML = `<div class="mini-row"><span class="dot ok"></span><div class="grow"><div>证书有效${names ? ' · ' + esc(names) : ''}</div><div class="mono">到期 ${esc(ac.notAfter)}</div></div></div>` + miss;
   } else if (ac.enabled) {
     $('#ov-acme').innerHTML = '<p class="empty">已启用，尚未签发</p>';
   } else {
@@ -407,9 +434,16 @@ function renderACME() {
     rows.push(`<div class="mini-row"><span class="dot err"></span><div class="grow">
       <div>签发失败</div><div class="mono">${esc(st.lastError)}</div></div></div>`);
   } else if (st.notAfter) {
+    const names = certNameLine(st);
     rows.push(`<div class="mini-row"><span class="dot ok"></span><div class="grow">
-      <div>证书有效${st.subject ? ' · ' + esc(st.subject) : ''}</div>
+      <div>证书有效${names ? ' · ' + esc(names) : ''}</div>
       <div class="mono">到期时间 ${esc(st.notAfter)}</div></div></div>`);
+    // 显示在管域名里还没被这张证书覆盖的（比如只签过 *.example.com 又加了根域）
+    if (st.missing && st.missing.length) {
+      rows.push(`<div class="mini-row"><span class="dot warn"></span><div class="grow">
+        <div>有 ${st.missing.length} 个域名还没生效</div>
+        <div class="mono">${esc(st.missing.join('、'))} · 点「立即签发」补上</div></div></div>`);
+    }
   } else if (st.enabled) {
     rows.push('<div class="mini-row"><span class="dot warn"></span><div class="grow"><div>还没有证书</div><div class="mono">点「立即签发」开始申请</div></div></div>');
   } else {

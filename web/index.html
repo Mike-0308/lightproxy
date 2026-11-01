@@ -409,9 +409,17 @@
 
     <div class="card">
       <div class="card-hd"><h2>配置备份</h2></div>
-      <p class="tip">导出为一个 <code>.zip</code> 压缩包，里面包含全部设置（反向代理、DDNS、端口转发、访问控制）<b>以及证书文件和私钥</b>，
-        换机器或重装后直接导入即可使用，不需要重新签发证书。
-        <b>注意：包里包含阿里云 AccessKey 与证书私钥，请妥善保管。</b>导入会立即生效并覆盖当前配置，导入前会先校验，不合法的包不会生效。</p>
+      <p class="tip">导出为一个 <code>.zip</code> 压缩包，里面是三样东西：</p>
+      <ul class="tip">
+        <li><b>config.json</b> —— 全部设置：反代规则与安全策略（入口路径、IP 黑白名单）、
+          端口转发、DDNS（含所用服务商的 <b>密钥明文</b>）、自动证书配置、网络唤醒设备清单、
+          终端的本机 Shell 与 SSH 连接（<b>含密码/私钥</b>）、运行时参数、面板登录账号密码。</li>
+        <li><b>certs/</b> —— 证书目录里的所有证书与<b>私钥</b>，以及手动指定的那张证书/私钥。</li>
+        <li><b>acme_account.key</b> —— 自动证书的账户密钥，带上它恢复后不用重新注册。</li>
+      </ul>
+      <p class="tip">换机器或重装后导入即可直接使用，证书不用重新签发。
+        <b>注意：压缩包里是明文密钥（云厂商密钥、SSH 密码、证书私钥、面板密码），不要外传。</b>
+        导入会先校验再生效，不合法的包不会覆盖现有配置；也兼容旧版导出的纯 JSON。</p>
       <div class="actions">
         <button class="ghost" id="btnExportCfg">导出备份（含证书）</button>
         <button class="ghost" id="btnImportCfg">导入备份</button>

@@ -460,3 +460,80 @@ func TestIssueFailsWhenZoneMissing(t *testing.T) {
 		t.Fatal("域名不在账号下时应报错")
 	}
 }
+
+/* ---------- 证书域名清单（多域名证书的状态展示） ---------- */
+
+func TestCertNames(t *testing.T) {
+	leaf := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "*.example.com"},
+		DNSNames:     []string{"*.example.com", "example.com"},
+		SerialNumber: big.NewInt(1),
+	}
+	got := certNames(leaf)
+	want := []string{"*.example.com", "example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("期望 %v，实际 %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 项不对：期望 %s，实际 %s", i, want[i], got[i])
+		}
+	}
+
+	// 重复项与大小写、末尾点号都要归一 + 去重
+	leaf2 := &x509.Certificate{
+		DNSNames:     []string{"*.Example.com", "*.example.com.", "*.example.com"},
+		SerialNumber: big.NewInt(2),
+	}
+	if n := certNames(leaf2); len(n) != 1 || n[0] != "*.example.com" {
+		t.Fatalf("去重失败: %v", n)
+	}
+
+	// 没有 SAN 的老证书退回 CN
+	leaf3 := &x509.Certificate{Subject: pkix.Name{CommonName: "old.example.com"}, SerialNumber: big.NewInt(3)}
+	if n := certNames(leaf3); len(n) != 1 || n[0] != "old.example.com" {
+		t.Fatalf("CN 回退失败: %v", n)
+	}
+}
+
+func TestNameCovered(t *testing.T) {
+	cases := []struct {
+		cert, host string
+		want       bool
+	}{
+		{"example.com", "example.com", true},
+		{"*.example.com", "a.example.com", true},
+		{"*.example.com", "example.com", false},     // 泛域名不覆盖根域，必须单独签
+		{"*.example.com", "a.b.example.com", false}, // 只覆盖一级
+		{"a.example.com", "b.example.com", false},
+		{"*.example.com", "*.example.com", true}, // 配置里写的就是泛域名本身
+	}
+	for _, c := range cases {
+		if got := nameCovered(c.cert, c.host); got != c.want {
+			t.Errorf("%s 覆盖 %s 得到 %v，期望 %v", c.cert, c.host, got, c.want)
+		}
+	}
+}
+
+func TestMissingDomains(t *testing.T) {
+	// 场景同线上：先签了泛域名，后来加上根域但还没重签
+	cert := []string{"*.example.com"}
+	missing := missingDomains([]string{"*.example.com", "example.com"}, cert)
+	if len(missing) != 1 || missing[0] != "example.com" {
+		t.Fatalf("应只剩根域未覆盖，实际 %v", missing)
+	}
+
+	// 重签之后两个都在
+	if got := missingDomains([]string{"*.example.com", "example.com"}, []string{"*.example.com", "example.com"}); len(got) != 0 {
+		t.Fatalf("全部覆盖时应为空，实际 %v", got)
+	}
+
+	// 没有证书时全部算缺失
+	if got := missingDomains([]string{"a.com", "b.com"}, nil); len(got) != 2 {
+		t.Fatalf("无证书应全部缺失，实际 %v", got)
+	}
+
+	if got := missingDomains(nil, nil); got != nil {
+		t.Fatalf("无配置应返回 nil，实际 %v", got)
+	}
+}

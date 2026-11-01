@@ -65,21 +65,49 @@ func startShell(shell string, rows, cols uint16) (*exec.Cmd, *os.File, error) {
 	}
 	resizePTY(m, rows, cols)
 
-	cmd := exec.Command(shell, "-i")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = s, s, s
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:  true,
-		Setctty: true,
-		Ctty:    int(s.Fd()),
-	}
-	if err := cmd.Start(); err != nil {
-		m.Close()
+	cmd, err := spawnShell(shell, s)
+	if err != nil {
 		s.Close()
+		m.Close()
 		return nil, nil, err
 	}
+	// 从端已经在子进程里 dup 走了，父进程这边只留主端。
 	s.Close()
 	return cmd, m, nil
+}
+
+// spawnShell 在新会话里 exec shell，并把 PTY 从端设成它的控制终端。
+//
+// SysProcAttr.Ctty 的语义必须注意：它是**子进程里的 fd 编号**（ProcAttr.Files 的下标，
+// 也就是 0/1/2），而不是父进程里的 fd 号。以前写成 int(s.Fd()) 时，只要从端在父进程里
+// 的 fd 号 >= 3，就会被 os/exec 在 fork 前拦下来：
+//
+//	"Setctty set but Ctty not valid in child"
+//
+// 表现为本机终端一律打不开（路由器上进程常开几张表，fd 号基本都大于 2）。
+func spawnShell(shell string, tty *os.File) (*exec.Cmd, error) {
+	env := append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	var last error
+
+	// 优先带控制终端（Ctrl+C、fg/bg 这类作业控制要它）；失败再退一步不设。
+	for _, setctty := range []bool{true, false} {
+		cmd := exec.Command(shell, "-i")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+		cmd.Env = env
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: setctty, Ctty: 0}
+		if err := cmd.Start(); err == nil {
+			return cmd, nil
+		} else {
+			// 命令可能先 fork 成功了、在子进程里才出错（比如 TIOCSCTTY 被拒），
+			// 这时要把残留的子进程收干净再重试。
+			last = err
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_, _ = cmd.Process.Wait()
+			}
+		}
+	}
+	return nil, last
 }
 
 func resizePTY(f *os.File, rows, cols uint16) {

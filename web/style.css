@@ -69,6 +69,9 @@ main { max-width: 940px; margin: 0 auto; padding: 18px 18px 60px; }
 .card-hd h3, .sub { font-size: 13.5px; margin: 18px 0 8px; color: var(--muted); font-weight: 600; }
 .hint { font-size: 12px; color: var(--muted); }
 .tip { font-size: 12.5px; color: var(--muted); margin: 6px 0 14px; line-height: 1.6; }
+ul.tip { padding-left: 18px; margin: 4px 0 12px; }
+ul.tip li { margin: 3px 0; }
+.tip b, ul.tip b { color: var(--text); font-weight: 600; }
 .link { color: var(--accent); font-size: 12.5px; cursor: pointer; text-decoration: none; }
 .link:hover { text-decoration: underline; }
 .empty { color: var(--muted); font-size: 13px; margin: 10px 0; }

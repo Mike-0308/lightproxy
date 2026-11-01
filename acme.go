@@ -679,6 +679,12 @@ type ACMEStatus struct {
 	LastOK    string    `json:"lastOk,omitempty"`
 	NotAfter  string    `json:"notAfter,omitempty"`
 	Subject   string    `json:"subject,omitempty"`
+	// SANs 是证书里实际绑定的所有域名（SAN 列表）。多域名证书光看 Subject
+	// 只会显示第一个，面板以前就是这么显示不全的。
+	SANs []string `json:"sans,omitempty"`
+	// Missing 是配置里要签、但当前证书并没有覆盖的域名（比如只签了
+	// *.example.com，又加上 example.com 却还没重新签发）。
+	Missing []string `json:"missing,omitempty"`
 }
 
 type ACMEManager struct {
@@ -714,13 +720,79 @@ func (m *ACMEManager) Snapshot() ACMEStatus {
 	st := m.status
 	st.Enabled = m.cfg.Enable
 	st.Domains = m.cfg.Domains
-	if st.NotAfter == "" {
-		if leaf := m.readLeaf(); leaf != nil {
-			st.NotAfter = leaf.NotAfter.Format("2006-01-02 15:04")
-			st.Subject = leaf.Subject.CommonName
+	// 每次都按磁盘上的实际证书重算：这样手工换证、删证都能立刻反映出来。
+	st.Subject, st.SANs, st.NotAfter = "", nil, ""
+	if leaf := m.readLeaf(); leaf != nil {
+		st.Subject = leaf.Subject.CommonName
+		st.SANs = certNames(leaf)
+		st.NotAfter = leaf.NotAfter.Format("2006-01-02 15:04")
+	}
+	st.Missing = missingDomains(st.Domains, st.SANs)
+	return st
+}
+
+// certNames 取证书里实际绑定的所有域名：以 SAN 为准，没有 SAN 的老证书退回 CN。
+func certNames(leaf *x509.Certificate) []string {
+	var out []string
+	seen := map[string]bool{}
+	push := func(n string) {
+		n = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(n)), ".")
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	for _, n := range leaf.DNSNames {
+		push(n)
+	}
+	if len(out) == 0 {
+		push(leaf.Subject.CommonName)
+	}
+	return out
+}
+
+// missingDomains 返回 want 里没有被证书域名列表覆盖的部分（保持配置里的顺序）。
+func missingDomains(want, certNames []string) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	var out []string
+	for _, w := range want {
+		w = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(w)), ".")
+		if w == "" {
+			continue
+		}
+		ok := false
+		for _, n := range certNames {
+			if nameCovered(n, w) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			out = append(out, w)
 		}
 	}
-	return st
+	return out
+}
+
+// nameCovered 判断证书上的一个域名能否覆盖目标主机：完全相等，或形如
+// *.example.com 覆盖且只覆盖下一级子域（*.example.com 不覆盖 example.com，
+// 所以根域要单独签一条）。
+func nameCovered(certName, host string) bool {
+	if certName == host {
+		return true
+	}
+	if !strings.HasPrefix(certName, "*.") {
+		return false
+	}
+	base := certName[2:]
+	i := strings.IndexByte(host, '.')
+	if i < 0 {
+		return false
+	}
+	return strings.HasSuffix(host, "."+base) && strings.Count(host, ".") == strings.Count(base, ".")+1
 }
 
 func (m *ACMEManager) certPath() string {
@@ -880,10 +952,14 @@ func (m *ACMEManager) IssueNow() error {
 	m.status.LastOK = time.Now().Format("2006-01-02 15:04")
 	m.status.NotAfter = ""
 	m.status.Subject = ""
+	m.status.SANs = nil
+	m.status.Missing = nil
 	leaf := m.readLeafLocked()
 	if leaf != nil {
 		m.status.NotAfter = leaf.NotAfter.Format("2006-01-02 15:04")
 		m.status.Subject = leaf.Subject.CommonName
+		m.status.SANs = certNames(leaf)
+		m.status.Missing = missingDomains(cfg.Domains, m.status.SANs)
 	}
 	m.mu.Unlock()
 
