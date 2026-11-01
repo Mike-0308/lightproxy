@@ -213,14 +213,17 @@ curl -fsSL https://gitee.com/jxmike/lightproxy/raw/main/scripts/install.sh | sh 
 
 ## 开机自启
 
-不赌单一入口，安装时能挂的钩子全部挂上（彼此幂等），重启后总有活着的：
+只挂 **一个** 能活过重启的入口。早期版本为了"总能起来"把 init.d、防火墙 include、rc.local、cron 全挂了一遍，结果重启后两套机制各起一个进程，第二个抢不到端口就变成白占十几 MB 内存的空壳。现在按固件实际情况选一条：
 
-1. 真 OpenWrt（有 procd）→ `/etc/init.d/lightproxy`
-2. 防火墙 include → `/etc/config/firewall`（`/etc` 重启还原的固件上，这是最可靠的持久化点）
-3. `/etc/rc.local`
-4. **cron 兜底**：哪怕上面全部丢失，每 2 分钟也会把服务拉起来
+| 固件情况 | 挂在哪里 |
+|---|---|
+| `/etc` 能持久化 + 有 procd（真 OpenWrt） | `/etc/init.d/lightproxy`，procd 托管，进程挂了自动重启 |
+| `/etc` 挂在 ramfs 上（小米／红米等固件，重启清空 `/etc`） | `/etc/config/firewall` 的 `config include 'lightproxy'` → `$PREFIX/startup.sh`。这类固件只有 `/etc/config` 是 ubifs 持久化的，`init.d`、`rc.d`、`rc.local`、`crontab` 重启后全没了 |
+| 没有 uci 的老固件 | `/etc/rc.local` → `$PREFIX/startup.sh` |
 
-启动脚本自带 5 分钟重试并落盘 `$PREFIX/boot.log`：开机早期 `/data` 可能还没挂载，第一次跑不到也会自动再来。
+启动脚本自带 5 分钟重试并落盘 `$PREFIX/boot.log`：开机早期网络或端口还没就绪也不会一跑了之；起来 3 秒后再复核一次，避免"刚起就崩"被误判成成功。
+
+非 procd 的设备还会顺手在 `/etc/crontabs/root` 里装一条每 2 分钟的 `ctl start` 守护（crontab 也在 ramfs 上，所以每次开机由 `startup.sh` 重新写入），崩溃后最多 2 分钟自动拉回。`ctl start` 是幂等的——先读 pid 文件，再按命令行兜底，还有 `run.lock` 做并发保护，cron、防火墙重载、手工调用同时触发也只会有一个进程。
 
 重启路由器后如果服务没起来：
 
@@ -360,7 +363,7 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 | 现象 | 处理 |
 |---|---|
 | 面板打不开 | `netstat -lntp \| grep 18080` 看端口；`/data/lightproxy/ctl status` 看进程；`console.log` 看报错 |
-| 重启路由后服务没起来 | `/data/lightproxy/ctl verify` 看哪些自启挂钩还在、启动卡在哪；`ctl start` 手动拉起 |
+| 重启路由后服务没起来 | `/data/lightproxy/ctl verify` 看自启入口挂在哪、启动卡在哪；`ctl start` 手动拉起 |
 | DDNS 报 SignatureDoesNotMatch / IamSignatureInvalid | 路由器时钟不准，确认 NTP 已同步（各家签名都对时间敏感） |
 | DDNS 报 AccessKey 无效 | 密钥填错、被禁用，或子账号没有 DNS 权限 |
 | DDNS 报「账号里没有域名」 | 「域名」栏要填**主域名**（如 `example.com`），泛解析把 `*` 填在「主机记录」栏；也可以直接在域名栏写 `*.example.com`，保存时自动拆分。域名还必须已托管在该服务商 |
@@ -369,7 +372,7 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 | 域名解析不生效 | `nslookup home.example.com` 看 TTL；到对应服务商的解析页确认记录值 |
 | 端口转发报「iptables 不可用」 | 用 root 运行；或 `forward.backend` 改 `nftables` 试试 |
 | 端口转发下发失败已回滚 | 看「生效状态」里的错误详情；确认目标 IP 可 ping、外网端口没被系统占用 |
-| 转发规则重启后丢了 | 看「生效状态」的持久化说明；一般由 `/etc/config/firewall` 的 `lightproxy_fw` include 恢复，cron 每 2 分钟兜底 |
+| 转发规则重启后丢了 | 看「生效状态」的持久化说明；一般由 `/etc/config/firewall` 的 `lightproxy_fw` include 恢复，进程被 cron 拉回时也会重新下发 |
 | 证书报「找不到对应的域名」 | 「检查配置」看每个域名的 zone 匹配；域名必须托管在同一个阿里云账号 |
 | 证书验证超时 | DNS 传播慢，稍等几分钟重新点「立即签发」；刚改过解析的域名等 TTL 过期 |
 | 打开页面显示 403「只允许域名访问」 | 访问方式不对：用反代规则里配置的域名访问；救急可 SSH 改 `config.json` 里 `security.requireDomain=false` 后 `ctl restart` |

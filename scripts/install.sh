@@ -399,161 +399,226 @@ else
 fi
 
 # ---------------------------------------------------------------- 控制脚本
-cat > "$PREFIX/ctl" <<CTLEOF
+cat > "$PREFIX/ctl" <<'CTLEOF'
 #!/bin/sh
-PREFIX="$PREFIX"
-BIN="\$PREFIX/bin/lightproxy"
-CFG="\$PREFIX/config.json"
-PIDF="\$PREFIX/run/lightproxy.pid"
-LOG="\$PREFIX/lightproxy.log"
-CONSOLE="\$PREFIX/console.log"
-BOOTLOG="\$PREFIX/boot.log"
+# 轻代理控制脚本。
+# 单实例保证：先看 pid 文件，再按命令行兜底——防火墙 include、cron、手工调用
+# 重复执行 start 都不会拉起第二个进程（第二个只会因端口占用变成白占内存的空壳）。
+PREFIX="__LP_PREFIX__"
+BIN="$PREFIX/bin/lightproxy"
+CFG="$PREFIX/config.json"
+PIDF="$PREFIX/run/lightproxy.pid"
+LOG="$PREFIX/lightproxy.log"
+CONSOLE="$PREFIX/console.log"
+BOOTLOG="$PREFIX/boot.log"
+INITD="/etc/init.d/lightproxy"
+LOCK="$PREFIX/run.lock"
 
-is_running() {
-  [ -f "\$PIDF" ] || return 1
-  P=\$(cat "\$PIDF" 2>/dev/null)
-  [ -n "\$P" ] || return 1
-  kill -0 "\$P" 2>/dev/null || return 1
-  # 重启后 pid 会被别的进程复用，必须确认是自家的
-  if [ -r "/proc/\$P/cmdline" ]; then
-    grep -q lightproxy "/proc/\$P/cmdline" 2>/dev/null || return 1
+# 有 procd 托管（且 /etc 能持久化的真 OpenWrt）才走 init.d
+has_procd() {
+  [ -x "$INITD" ] && [ -f /etc/rc.common ] && [ -x /sbin/procd ] && "$INITD" enabled >/dev/null 2>&1
+}
+
+# 输出正在运行的 pid：优先 pid 文件，再按命令行兜底
+find_pid() {
+  if [ -f "$PIDF" ]; then
+    P=$(cat "$PIDF" 2>/dev/null)
+    if [ -n "$P" ] && kill -0 "$P" 2>/dev/null && grep -q lightproxy "/proc/$P/cmdline" 2>/dev/null; then
+      echo "$P"; return 0
+    fi
   fi
-  return 0
+  P=$(ps w 2>/dev/null | grep "[l]ightproxy -c" | awk 'NR==1{print $1}')
+  if [ -n "$P" ]; then echo "$P"; return 0; fi
+  return 1
+}
+
+wait_pid() {
+  i=0
+  while [ $i -lt "$1" ]; do
+    sleep 1
+    if P=$(find_pid); then echo "$P"; return 0; fi
+    i=$((i+1))
+  done
+  return 1
 }
 
 start() {
-  if is_running; then echo "已在运行 (pid \$(cat \$PIDF))"; return 0; fi
-  mkdir -p "\$PREFIX/run"
-  rm -f "\$PIDF"
+  if P=$(find_pid); then echo "已在运行 (pid $P)"; return 0; fi
+  # 并发保护：开机时防火墙 include 与 cron 可能同时触发
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    sleep 3
+    if P=$(find_pid); then echo "已在运行 (pid $P)"; return 0; fi
+    rmdir "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null
+  fi
+
+  if has_procd; then
+    "$INITD" start >/dev/null 2>&1
+    if P=$(wait_pid 8); then rmdir "$LOCK" 2>/dev/null; echo "已启动 (pid $P，procd 托管)"; return 0; fi
+    echo "procd 启动未成功，改用直接启动"
+  fi
+
+  mkdir -p "$PREFIX/run"
+  rm -f "$PIDF"
   # 路由器固件常把 nohup 裁掉（BusyBox 精简编译），不能硬依赖。
   # 退让方案：在子 shell 里先把 HUP 设为忽略再 exec——pid 不变、SSH 断开也不会被杀。
   if command -v nohup >/dev/null 2>&1; then
-    LP_LOG="\$LOG" nohup "\$BIN" -c "\$CFG" > "\$CONSOLE" 2>&1 &
+    LP_LOG="$LOG" nohup "$BIN" -c "$CFG" > "$CONSOLE" 2>&1 &
   else
-    ( trap '' HUP; LP_LOG="\$LOG"; export LP_LOG; exec "\$BIN" -c "\$CFG" ) </dev/null > "\$CONSOLE" 2>&1 &
+    ( trap '' HUP; LP_LOG="$LOG"; export LP_LOG; exec "$BIN" -c "$CFG" ) </dev/null > "$CONSOLE" 2>&1 &
   fi
-  echo \$! > "\$PIDF"
-  sleep 1
-  is_running || sleep 1
-  if is_running; then
-    echo "已启动 (pid \$(cat \$PIDF))"
-    return 0
-  fi
+  echo $! > "$PIDF"
+  rmdir "$LOCK" 2>/dev/null
+  if P=$(wait_pid 6); then echo "已启动 (pid $P)"; return 0; fi
   echo "启动失败，最近输出："
-  tail -n 15 "\$CONSOLE" 2>/dev/null
-  rm -f "\$PIDF"
+  tail -n 15 "$CONSOLE" 2>/dev/null
+  rm -f "$PIDF"
   return 1
 }
 
 stop() {
-  if ! is_running; then echo "未在运行"; rm -f "\$PIDF"; return 0; fi
-  PID=\$(cat "\$PIDF")
-  kill "\$PID" 2>/dev/null
-  i=0
-  while kill -0 "\$PID" 2>/dev/null && [ \$i -lt 10 ]; do sleep 1; i=\$((i+1)); done
-  kill -9 "\$PID" 2>/dev/null
-  rm -f "\$PIDF"
+  # 托管的实例交给 procd 停，否则它会被 respawn 又拉起来
+  if has_procd; then "$INITD" stop >/dev/null 2>&1; fi
+  if P=$(find_pid); then
+    kill "$P" 2>/dev/null
+    i=0
+    while kill -0 "$P" 2>/dev/null && [ $i -lt 12 ]; do sleep 1; i=$((i+1)); done
+    kill -9 "$P" 2>/dev/null
+  fi
+  rm -f "$PIDF"
+  rmdir "$LOCK" 2>/dev/null
   echo "已停止"
 }
 
 # verify 自检：重启后如果发现服务没起来，先跑这个
 verify() {
   echo "== 进程"
-  if is_running; then echo "  运行中 (pid \$(cat \$PIDF))"; else echo "  未运行"; fi
-  echo "== 开机自启挂钩"
-  if [ -f /etc/init.d/lightproxy ] && [ -x /etc/rc.common ]; then
-    grep -q lightproxy /etc/rc.d 2>/dev/null && D="已启用" || D="已写入（enable 状态未知）"
-    echo "  init.d(procd): \$D"
-  else
-    echo "  init.d(procd): 无"
+  if P=$(find_pid); then echo "  运行中 (pid $P)"; else echo "  未运行"; fi
+  echo "== 开机自启（只应有一个）"
+  N=0
+  if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1 && uci -q show firewall.lightproxy >/dev/null 2>&1; then
+    echo "  firewall include: 已挂 $(uci -q get firewall.lightproxy.path)"; N=$((N+1))
   fi
-  if [ -f /etc/config/firewall ]; then
-    if grep -q "\$PREFIX/startup.sh" /etc/config/firewall 2>/dev/null; then
-      echo "  firewall include: 已写入"
-    else
-      echo "  firewall include: 未找到（重启后可能丢失）"
-    fi
-  else
-    echo "  firewall include: 无 /etc/config/firewall"
+  if has_procd; then echo "  procd: 已启用 /etc/init.d/lightproxy"; N=$((N+1)); fi
+  if [ -f /etc/rc.local ] && grep -q lightproxy /etc/rc.local 2>/dev/null; then
+    echo "  /etc/rc.local: 已写入"; N=$((N+1))
   fi
-  if [ -f /etc/rc.local ]; then
-    if grep -q "\$PREFIX/ctl start" /etc/rc.local 2>/dev/null; then
-      echo "  rc.local: 已写入"
-    else
-      echo "  rc.local: 未写入"
-    fi
+  [ "$N" -eq 0 ] && echo "  ！一个都没有，重启后不会自启"
+  [ "$N" -gt 1 ] && echo "  ！有 $N 个入口，重复但不致命（start 是幂等的），可删掉多余项"
+  if [ -f /etc/crontabs/root ] && grep -q "$PREFIX/ctl start" /etc/crontabs/root 2>/dev/null; then
+    echo "  cron 守护: 已注册（每 2 分钟，崩溃自愈，不会重复启动）"
   else
-    echo "  rc.local: 无"
+    echo "  cron 守护: 无（仅影响崩溃自愈）"
   fi
-  if [ -f /etc/crontabs/root ]; then
-    if grep -q "\$PREFIX/ctl start" /etc/crontabs/root 2>/dev/null; then
-      echo "  cron 兜底: 已写入"
-    else
-      echo "  cron 兜底: 未写入"
-    fi
-  else
-    echo "  cron 兜底: 无 /etc/crontabs/root"
-  fi
-  echo "== 启动脚本日志（开机重试记录）"
-  if [ -f "\$BOOTLOG" ]; then tail -n 8 "\$BOOTLOG"; else echo "  （空）"; fi
-  echo "== 历史报错"
-  if [ -f "\$CONSOLE" ]; then tail -n 5 "\$CONSOLE"; else echo "  （空）"; fi
+  echo "== 服务日志"
+  if [ -f "$LOG" ]; then tail -n 6 "$LOG"; else echo "  （空）"; fi
+  echo "== 直接启动的输出"
+  if [ -f "$CONSOLE" ]; then tail -n 5 "$CONSOLE"; else echo "  （空）"; fi
+  echo "== 开机启动记录"
+  if [ -f "$BOOTLOG" ]; then tail -n 5 "$BOOTLOG"; else echo "  （空）"; fi
 }
 
-case "\$1" in
+case "$1" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; start ;;
-  status)  if is_running; then echo "运行中 (pid \$(cat \$PIDF))"; else echo "未运行"; fi ;;
-  log)     tail -n 60 "\$LOG" 2>/dev/null || tail -n 60 "\$CONSOLE" ;;
+  status)  if P=$(find_pid); then echo "运行中 (pid $P)"; else echo "未运行"; fi ;;
+  log)     tail -n 60 "$LOG" 2>/dev/null || tail -n 60 "$CONSOLE" ;;
   verify)  verify ;;
-  *)       echo "用法: \$0 {start|stop|restart|status|log|verify}" ;;
+  *)       echo "用法: $0 {start|stop|restart|status|log|verify}" ;;
 esac
 CTLEOF
 chmod +x "$PREFIX/ctl"
+sed -i "s|__LP_PREFIX__|$PREFIX|g" "$PREFIX/ctl"
 
 # ---------------------------------------------------------------- 开机自启
-# 不赌单一入口，能挂的都挂上（每个都幂等），重启后总有活着的：
-#   1. 真 OpenWrt（有 procd）→ /etc/init.d
-#   2. 防火墙 include → /etc/config/firewall（小米固件最可靠的持久化点）
-#   3. /etc/rc.local
-#   4. cron 兜底：哪怕上面全部丢失，每 2 分钟也会把服务拉起来
-# startup.sh 自身带 5 分钟重试：开机早期 /data 可能还没挂载，第一次跑不到也不放弃。
+# 只挂一个能真正活过重启的入口。历史上为了"总能起来"把 init.d / 防火墙 include /
+# rc.local / cron 全挂了一遍，结果重启后 procd 和 cron 各起一个，第二个抢不到端口
+# 就变成白占十几 MB 的空壳。现在按固件实际情况选一个：
+#   1. /etc 持久化 + 有 procd（真 OpenWrt）→ /etc/init.d（procd 托管，崩溃自动重启）
+#   2. /etc/config/firewall 的 include 段 —— 小米/红米固件把 /etc 挂在 ramfs 上，
+#      重启会清空 init.d、rc.d、rc.local、crontab，只有 /etc/config 是 ubifs 持久化的
+#   3. /etc/rc.local（老固件兜底）
+# startup.sh 自身带 5 分钟重试：开机早期网络/端口没就绪也不会一跑了之。
 HOOKS=""
+ETC_PERSIST=1
+if grep -qE " /etc (ramfs|tmpfs) " /proc/mounts 2>/dev/null; then ETC_PERSIST=0; fi
 
-cat > "$PREFIX/startup.sh" <<STARTEOF
+# 先清掉历史版本留下的所有入口，避免多实例
+if [ -f /etc/init.d/lightproxy ]; then
+  /etc/init.d/lightproxy disable >/dev/null 2>&1
+  /etc/init.d/lightproxy stop >/dev/null 2>&1
+  rm -f /etc/init.d/lightproxy /etc/rc.d/S95lightproxy /etc/rc.d/K10lightproxy
+fi
+if [ -f /etc/rc.local ]; then
+  sed -i "\|$PREFIX/startup.sh|d" /etc/rc.local 2>/dev/null
+  sed -i "\|$PREFIX/ctl start|d" /etc/rc.local 2>/dev/null
+fi
+if [ -f /etc/crontabs/root ]; then
+  sed -i "\|$PREFIX/ctl start|d" /etc/crontabs/root 2>/dev/null
+fi
+if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
+  uci -q delete firewall.lightproxy >/dev/null 2>&1
+  uci -q commit firewall >/dev/null 2>&1
+fi
+
+cat > "$PREFIX/startup.sh" <<'STARTEOF'
 #!/bin/sh
-# 开机启动入口（由 firewall include / rc.local / init.d 调用）
+# 轻代理开机启动入口（由 /etc/config/firewall 的 include 段或 rc.local 调用）
+PREFIX="__LP_PREFIX__"
 BOOTLOG="$PREFIX/boot.log"
+
+# crontab 也常挂在 ramfs 上（重启清空），所以每次开机重装一条 2 分钟守护。
+# 有 procd 托管的设备不需要 —— procd 自己会 respawn。
+install_watchdog() {
+  [ -x /etc/init.d/lightproxy ] && /etc/init.d/lightproxy enabled >/dev/null 2>&1 && return 0
+  [ -d /etc/crontabs ] || return 0
+  C=/etc/crontabs/root
+  touch "$C" 2>/dev/null || return 0
+  grep -q "$PREFIX/ctl start" "$C" 2>/dev/null || \
+    echo "*/2 * * * * $PREFIX/ctl start >/dev/null 2>&1" >> "$C"
+  ps 2>/dev/null | grep -q "[c]rond" || {
+    /etc/init.d/cron start >/dev/null 2>&1 || crond >/dev/null 2>&1
+  }
+}
+
 (
   trap '' HUP
   i=0
-  while [ \$i -lt 60 ]; do
-    if [ -x $PREFIX/ctl ] && $PREFIX/ctl start >>"\$BOOTLOG" 2>&1; then
-      echo "\$(date '+%F %T') 启动成功（第 \$((\$i+1)) 次尝试）" >>"\$BOOTLOG"
-      exit 0
+  while [ $i -lt 60 ]; do
+    if [ -x "$PREFIX/ctl" ] && "$PREFIX/ctl" start >>"$BOOTLOG" 2>&1; then
+      # 刚起来就崩（端口没就绪）也算失败，等 3 秒复核一次
+      sleep 3
+      if "$PREFIX/ctl" status 2>/dev/null | grep -q 运行中; then
+        echo "$(date '+%F %T') 启动成功（第 $(($i+1)) 次尝试）" >>"$BOOTLOG"
+        install_watchdog
+        exit 0
+      fi
     fi
     sleep 5
-    i=\$((\$i+1))
+    i=$(($i+1))
   done
-  echo "\$(date '+%F %T') 重试 5 分钟仍失败，放弃" >>"\$BOOTLOG"
-) </dev/null >>"\$BOOTLOG" 2>&1 &
+  echo "$(date '+%F %T') 重试 5 分钟仍失败，放弃" >>"$BOOTLOG"
+) </dev/null >>"$BOOTLOG" 2>&1 &
 exit 0
 STARTEOF
 chmod +x "$PREFIX/startup.sh"
+sed -i "s|__LP_PREFIX__|$PREFIX|g" "$PREFIX/startup.sh"
 
-# 1) procd
-if [ -x /sbin/procd ] && [ -f /etc/rc.common ] && [ -d /etc/init.d ]; then
+if [ "$ETC_PERSIST" = 1 ] && [ -x /sbin/procd ] && [ -f /etc/rc.common ] && [ -d /etc/init.d ]; then
   cat > /etc/init.d/lightproxy <<INITEOF
 #!/bin/sh /etc/rc.common
+# 轻代理 —— 唯一开机自启入口（procd 托管）
 USE_PROCD=1
 START=95
 STOP=10
 
 start_service() {
+	mkdir -p $PREFIX/run
 	procd_open_instance
 	procd_set_param command $PREFIX/bin/lightproxy -c $PREFIX/config.json
 	procd_set_param env LP_SUPERVISED=1 LP_LOG=$PREFIX/lightproxy.log
+	procd_set_param pidfile $PREFIX/run/lightproxy.pid
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
@@ -562,41 +627,23 @@ start_service() {
 INITEOF
   chmod +x /etc/init.d/lightproxy
   /etc/init.d/lightproxy enable >/dev/null 2>&1
-  HOOKS="$HOOKS\n   - /etc/init.d/lightproxy（procd）"
-fi
-
-# 2) 防火墙 include
-if [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
+  HOOKS="   - /etc/init.d/lightproxy（procd 托管，/etc 能持久化）"
+elif [ -f /etc/config/firewall ] && command -v uci >/dev/null 2>&1; then
   uci set firewall.lightproxy=include
-  uci set firewall.lightproxy.type='script'
+  uci set firewall.lightproxy.type=script
   uci set firewall.lightproxy.path="$PREFIX/startup.sh"
-  uci set firewall.lightproxy.enabled='1'
+  uci set firewall.lightproxy.enabled=1
   uci commit firewall
-  HOOKS="$HOOKS\n   - /etc/config/firewall include → startup.sh"
-fi
-
-# 3) rc.local
-if [ -f /etc/rc.local ] && [ -w /etc/rc.local ]; then
-  if ! grep -q "$PREFIX/ctl start" /etc/rc.local 2>/dev/null && \
-     ! grep -q "$PREFIX/startup.sh" /etc/rc.local 2>/dev/null; then
-    sed -i "/^exit 0/i $PREFIX/startup.sh" /etc/rc.local 2>/dev/null
+  HOOKS="   - /etc/config/firewall include → startup.sh"
+  if [ "$ETC_PERSIST" = 0 ]; then
+    HOOKS="$HOOKS（本固件 /etc 是 ramfs，重启会清空 init.d/rc.local/crontab，只有这里是持久的）"
   fi
-  HOOKS="$HOOKS\n   - /etc/rc.local"
+elif [ -f /etc/rc.local ] && [ -w /etc/rc.local ]; then
+  sed -i "/^exit 0/i $PREFIX/startup.sh" /etc/rc.local 2>/dev/null
+  HOOKS="   - /etc/rc.local → startup.sh"
+else
+  HOOKS="   - 无（需手动添加启动项）"
 fi
-
-# 4) cron 兜底（busybox crond 每分钟重读 crontabs）
-if [ -d /etc/crontabs ] && [ -w /etc/crontabs/root ] || { [ -d /etc/crontabs ] && touch /etc/crontabs/root 2>/dev/null; }; then
-  if ! grep -q "$PREFIX/ctl start" /etc/crontabs/root 2>/dev/null; then
-    echo "*/2 * * * * $PREFIX/ctl start >> $PREFIX/boot.log 2>&1" >> /etc/crontabs/root
-  fi
-  # crond 没跑就拉起来
-  if ! ps 2>/dev/null | grep -v grep | grep -q crond; then
-    /etc/init.d/cron start >/dev/null 2>&1 || crond >/dev/null 2>&1
-  fi
-  HOOKS="$HOOKS\n   - cron（每 2 分钟兜底）"
-fi
-
-[ -n "$HOOKS" ] || HOOKS="\n   - 无（需手动添加启动项）"
 
 # ---------------------------------------------------------------- 启动
 "$PREFIX/ctl" stop >/dev/null 2>&1
@@ -612,7 +659,7 @@ say "─────────────────────────
 say " 安装目录: $PREFIX"
 say " 控制命令: $PREFIX/ctl {start|stop|restart|status|log|verify}"
 say " 配置文件: $CFG"
-say " 开机自启（多重保险，全部幂等）:"
+say " 开机自启（单一入口，重复调用也不会起第二个进程）:"
 printf '%b\n' "$HOOKS"
 say ""
 say " 管理面板: http://$IPADDR:18080/"
