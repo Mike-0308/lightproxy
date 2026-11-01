@@ -20,7 +20,7 @@ DEFAULT_REPO="Mike-0308/lightproxy"
 # Gitee 镜像仓库：二进制优先从这里下（国内直连快），可用 LP_GITEE 覆盖
 DEFAULT_GITEE="jxmike/lightproxy"
 # Gitee 上对应的发行版标签；发新版时与脚本一起改
-GITEE_TAG="${LP_GITEE_TAG:-v1.5.0}"
+GITEE_TAG="${LP_GITEE_TAG:-v1.5.1}"
 # 自定义镜像可放最前面：LP_MIRROR="https://your.mirror" sh install.sh
 LP_MIRROR="${LP_MIRROR:-}"
 
