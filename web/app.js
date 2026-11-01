@@ -8,6 +8,7 @@ const state = {
   status: null,
   editIndex: -1,
   tab: 'overview',
+  providers: [],
 };
 
 /* ---------- 小工具 ---------- */
@@ -78,12 +79,15 @@ async function loadAll() {
   renderACME();
   renderRecords();
   renderDDNS();
+  renderWOL();
+  renderWOLEdit();
   if (state.tab === 'logs') loadLogs();
 }
 
 function fillForms() {
   const c = state.config, d = c.ddns || {};
   $('#d-enable').checked = !!d.enable;
+  $('#d-provider').value = d.provider || 'aliyun';
   $('#d-ak').value = d.accessKeyId || '';
   $('#d-sk').value = d.accessKeySecret || '';
   $('#d-mode').value = d.ipMode || 'api';
@@ -91,6 +95,7 @@ function fillForms() {
   $('#d-interval').value = d.interval || 300;
   $('#d-ttl').value = d.ttl || 600;
   $('#d-sources').value = (d.ipSources || []).join('\n');
+  applyProviderUI();
 
   const t = c.tls || {}, a = c.admin || {}, rt = c.runtime || {};
   $('#s-listen').value = c.listen || '';
@@ -130,6 +135,14 @@ function fillForms() {
   $('#a-renewdays').value = ac.renewDays || 30;
   $('#a-ak').value = ac.accessKeyId || '';
   $('#a-sk').value = ac.accessKeySecret || '';
+
+  const tm = c.term || {};
+  $('#t-enable').checked = tm.enable !== false;
+  $('#t-lanonly').checked = tm.lanOnly !== false;
+  $('#t-keep').value = tm.keepMin == null ? 60 : tm.keepMin;
+  $('#t-max').value = tm.maxSessions || 4;
+  $('#t-shell').value = tm.shell || '';
+  renderSSH();
 }
 
 /* ---------- 安全入口提示 ---------- */
@@ -405,19 +418,73 @@ function renderACME() {
   $('#acmeStatus').innerHTML = rows.join('');
 }
 
+/* ---------- DDNS 服务商 ---------- */
+
+async function loadProviders() {
+  try {
+    const d = await api('/api/ddns/providers');
+    state.providers = d.providers || [];
+  } catch (e) {
+    state.providers = [];
+  }
+  const sel = $('#d-provider');
+  const cur = sel.value;
+  sel.innerHTML = state.providers.map(p =>
+    `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  if (cur) sel.value = cur;
+}
+
+function currentProvider() {
+  const id = ($('#d-provider') && $('#d-provider').value) || 'aliyun';
+  return state.providers.find(p => p.id === id) ||
+    { id, name: id, keyLabel: 'AccessKey ID', keyPlaceholder: '', secLabel: 'AccessKey Secret', secPlaceholder: '', needSecret: true, direct: false, hint: '', docs: '' };
+}
+
+function applyProviderUI() {
+  const p = currentProvider();
+  $('#d-ak-lbl').textContent = p.keyLabel || '密钥';
+  $('#d-ak').placeholder = p.keyPlaceholder || '';
+  $('#d-sk-row').classList.toggle('hidden', !p.needSecret);
+  if (p.needSecret) {
+    $('#d-sk-lbl').textContent = p.secLabel || 'Secret';
+    $('#d-sk').placeholder = p.secPlaceholder || '';
+  }
+  $('#d-hint').innerHTML = esc(p.hint || '选择域名托管在哪家服务商，把密钥填进来即可。');
+  const docs = $('#d-docs');
+  if (p.docs) {
+    docs.href = p.docs;
+    docs.classList.remove('hidden');
+  } else {
+    docs.classList.add('hidden');
+  }
+  if (p.direct) {
+    $('#d-rectip').innerHTML = p.id === 'duckdns'
+      ? '域名栏填子域名（如 <code>myhome</code>，不用写 <code>.duckdns.org</code>），主机记录保持 <code>@</code>；DuckDNS 每个子域名只维护一条 A / AAAA。'
+      : '域名栏填完整域名（如 <code>myhome.dynv6.net</code>），主机记录保持 <code>@</code>；dynv6 对 IPv6 支持最好。';
+  } else {
+    $('#d-rectip').innerHTML = '「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。' +
+      '也可以直接在域名栏写完整域名 <code>*.example.com</code>，保存时会自动拆开。';
+  }
+  renderRecords();
+}
+
 /* ---------- DDNS 记录 ---------- */
 
 function renderRecords() {
   const recs = (state.config.ddns && state.config.ddns.records) || [];
   const wrap = $('#recList');
+  const p = currentProvider();
+  const domainPH = p.direct
+    ? (p.id === 'duckdns' ? 'myhome' : 'myhome.dynv6.net')
+    : 'example.com';
   if (!recs.length) {
-    wrap.innerHTML = '<p class="empty">还没有记录。域名需已托管在阿里云解析。</p>';
+    wrap.innerHTML = `<p class="empty">还没有记录。${p.direct ? '填一个已经在 ' + esc(p.name) + ' 注册的主机名即可。' : '域名需已托管在' + esc(p.name) + '。'}</p>`;
     return;
   }
   wrap.innerHTML = recs.map((r, i) => `
     <div class="rec" data-i="${i}">
-      <input class="rec-domain" value="${esc(r.domain)}" placeholder="example.com">
-      <input class="rec-rr" value="${esc(r.rr || '@')}" placeholder="@ 或 * 或 home">
+      <input class="rec-domain" value="${esc(r.domain)}" placeholder="${esc(domainPH)}">
+      <input class="rec-rr" value="${esc(r.rr || '@')}" placeholder="@ 或 * 或 home"${p.direct ? ' disabled' : ''}>
       <select class="rec-type">
         <option value="A"${(r.type || 'A') === 'A' ? ' selected' : ''}>A</option>
         <option value="AAAA"${r.type === 'AAAA' ? ' selected' : ''}>AAAA</option>
@@ -428,7 +495,13 @@ function renderRecords() {
 
 function syncRecords(c) {
   const old = (state.config.ddns && state.config.ddns.records) || [];
-  c.ddns.records = $$('#recList .rec').map(row => {
+  const rows = $$('#recList .rec');
+  if (!rows.length) {
+    // 列表为空时不要清掉已有记录（可能是还没渲染出来的首次加载）
+    c.ddns.records = c.ddns.records || [];
+    return;
+  }
+  c.ddns.records = rows.map(row => {
     const base = Object.assign({}, old[+row.dataset.i] || {});
     base.domain = row.querySelector('.rec-domain').value.trim().toLowerCase();
     base.rr = row.querySelector('.rec-rr').value.trim() || '@';
@@ -464,6 +537,150 @@ function renderDDNS() {
   }).join('') : '<p class="empty">暂无同步记录</p>';
 }
 
+/* ---------- 网络唤醒 ---------- */
+
+function wolDevices() {
+  state.config.wol = state.config.wol || { devices: [] };
+  if (!Array.isArray(state.config.wol.devices)) state.config.wol.devices = [];
+  return state.config.wol.devices;
+}
+
+function renderWOL() {
+  const devs = wolDevices();
+  $('#wolList').innerHTML = devs.length ? devs.map((d, i) => `
+    <div class="mini-row">
+      <span class="dot"></span>
+      <div class="grow">
+        <div>${esc(d.name || '未命名设备')}</div>
+        <div class="mono">${esc((d.macs || []).join(' · ') || '未填 MAC')}${d.broadcast ? ' → ' + esc(d.broadcast) : ''}</div>
+      </div>
+      <button class="primary sm" data-wake="${i}">唤醒</button>
+    </div>`).join('') : '<p class="empty">还没有设备，在下面添加</p>';
+}
+
+function renderWOLEdit() {
+  const devs = wolDevices();
+  $('#wolEdit').innerHTML = devs.map((d, i) => `
+    <div class="wol-row">
+      <input data-wf="name" data-i="${i}" value="${esc(d.name || '')}" placeholder="群晖">
+      <input data-wf="macs" data-i="${i}" value="${esc((d.macs || []).join(', '))}" placeholder="00:11:32:AA:BB:CC">
+      <input data-wf="broadcast" data-i="${i}" value="${esc(d.broadcast || '')}" placeholder="留空 = 255.255.255.255">
+      <button class="del" data-delwol="${i}" title="删除">×</button>
+    </div>`).join('');
+}
+
+$('#btnAddWol').addEventListener('click', () => {
+  wolDevices().push({ name: '', macs: [], broadcast: '' });
+  renderWOLEdit();
+  renderWOL();
+  const names = $$('#wolEdit input[data-wf="name"]');
+  if (names.length) names[names.length - 1].focus();
+});
+
+$('#wolEdit').addEventListener('input', e => {
+  const el = e.target.closest('[data-wf]');
+  if (!el) return;
+  const dev = wolDevices()[+el.dataset.i];
+  if (!dev) return;
+  if (el.dataset.wf === 'macs') {
+    dev.macs = el.value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
+  } else {
+    dev[el.dataset.wf] = el.value.trim();
+  }
+});
+
+$('#wolEdit').addEventListener('click', e => {
+  const b = e.target.closest('[data-delwol]');
+  if (!b) return;
+  wolDevices().splice(+b.dataset.delwol, 1);
+  renderWOLEdit();
+  renderWOL();
+});
+
+$('#btnSaveWol').addEventListener('click', () => saveConfig(null, $('#wolErr')));
+
+$('#wolList').addEventListener('click', async e => {
+  const b = e.target.closest('[data-wake]');
+  if (!b) return;
+  const dev = wolDevices()[+b.dataset.wake];
+  if (!dev) return;
+  b.disabled = true;
+  try {
+    const d = await api('/api/wol/wake', { method: 'POST', body: JSON.stringify({ name: dev.name }) });
+    toast('已发出 ' + d.sent + ' 个魔术包');
+  } catch (err) {
+    toast(err.message, true);
+  }
+  setTimeout(() => { b.disabled = false; }, 800);
+});
+
+/* ---------- SSH 连接表（设置页） ---------- */
+
+function sshConns() {
+  state.config.term = state.config.term || {};
+  if (!Array.isArray(state.config.term.ssh)) state.config.term.ssh = [];
+  return state.config.term.ssh;
+}
+
+function renderSSH() {
+  const list = sshConns();
+  $('#sshList').innerHTML = list.map((c, i) => {
+    const isKey = c.auth === 'key';
+    return `
+    <div class="ssh-row">
+      <input data-sf="name" data-i="${i}" value="${esc(c.name || '')}" placeholder="群晖">
+      <input data-sf="host" data-i="${i}" value="${esc(c.host || '')}" placeholder="192.168.31.10">
+      <input data-sf="port" data-i="${i}" type="number" min="1" max="65535" value="${c.port || 22}">
+      <input data-sf="user" data-i="${i}" value="${esc(c.user || '')}" placeholder="root">
+      <select data-sf="auth" data-i="${i}">
+        <option value="password"${isKey ? '' : ' selected'}>密码</option>
+        <option value="key"${isKey ? ' selected' : ''}>私钥</option>
+      </select>
+      <input data-sf="secret" data-i="${i}" value="${esc(isKey ? (c.keyPath || '') : (c.password || ''))}"
+        placeholder="${isKey ? '/root/.ssh/id_ed25519' : '登录密码'}">
+      <button class="del" data-delssh="${i}" title="删除">×</button>
+    </div>`;
+  }).join('');
+}
+
+$('#btnAddSSH').addEventListener('click', () => {
+  sshConns().push({ name: '', host: '', port: 22, user: 'root', auth: 'password', password: '' });
+  renderSSH();
+  const names = $$('#sshList input[data-sf="name"]');
+  if (names.length) names[names.length - 1].focus();
+});
+
+$('#sshList').addEventListener('input', e => {
+  const el = e.target.closest('[data-sf]');
+  if (!el || el.tagName === 'SELECT') return;
+  const c = sshConns()[+el.dataset.i];
+  if (!c) return;
+  const f = el.dataset.sf;
+  if (f === 'secret') {
+    if (c.auth === 'key') c.keyPath = el.value.trim();
+    else c.password = el.value;
+    return;
+  }
+  if (f === 'port') c.port = +el.value || 22;
+  else c[f] = el.value.trim();
+});
+
+$('#sshList').addEventListener('change', e => {
+  const el = e.target.closest('select[data-sf]');
+  if (!el) return;
+  const c = sshConns()[+el.dataset.i];
+  if (!c) return;
+  c.auth = el.value;
+  renderSSH();
+});
+
+$('#sshList').addEventListener('click', e => {
+  const b = e.target.closest('[data-delssh]');
+  if (!b) return;
+  sshConns().splice(+b.dataset.delssh, 1);
+  renderSSH();
+});
+
 /* ---------- 配置收集与保存 ---------- */
 
 function collectConfig() {
@@ -478,7 +695,7 @@ function collectConfig() {
   c.ddns.interval = +$('#d-interval').value || 300;
   c.ddns.ttl = +$('#d-ttl').value || 600;
   c.ddns.ipSources = $('#d-sources').value.split(/[\n,，\s]+/).map(s => s.trim()).filter(Boolean);
-  c.ddns.provider = 'aliyun';
+  c.ddns.provider = $('#d-provider').value || 'aliyun';
   syncRecords(c);
 
   // 监听 / 面板 / 运行时
@@ -525,6 +742,14 @@ function collectConfig() {
   c.acme.renewDays = +$('#a-renewdays').value || 30;
   c.acme.accessKeyId = $('#a-ak').value.trim();
   c.acme.accessKeySecret = $('#a-sk').value.trim();
+
+  // 终端（SSH 列表在编辑时已经写回 state.config.term.ssh）
+  c.term = c.term || {};
+  c.term.enable = $('#t-enable').checked;
+  c.term.lanOnly = $('#t-lanonly').checked;
+  c.term.keepMin = Math.max(0, +$('#t-keep').value || 0);
+  c.term.maxSessions = +$('#t-max').value || 4;
+  c.term.shell = $('#t-shell').value.trim();
   return c;
 }
 
@@ -582,6 +807,8 @@ function switchTab(name) {
   if (name === 'logs') loadLogs();
   if (name === 'forward') renderForward();
   if (name === 'acme') renderACME();
+  if (name === 'wol') { renderWOL(); renderWOLEdit(); }
+  if (name === 'term') TermUI.show();
 }
 
 $('#tabs').addEventListener('click', e => {
@@ -644,19 +871,29 @@ $('#recList').addEventListener('click', e => {
 
 $('#btnSaveDDNS').addEventListener('click', () => saveConfig(null, $('#ddnsErr')));
 
+// 换服务商时先把手填的记录收回 state，再按新服务商重绘（否则输入框会丢内容）
+$('#d-provider').addEventListener('change', () => {
+  if (state.config) syncRecords(state.config);
+  applyProviderUI();
+});
+
 $('#btnTestAK').addEventListener('click', async () => {
   const ok = $('#ddnsOk'), err = $('#ddnsErr');
   hide(ok); hide(err);
+  const p = currentProvider();
   try {
     const d = await api('/api/ddns/test', {
       method: 'POST',
       body: JSON.stringify({
+        provider: $('#d-provider').value,
         accessKeyId: $('#d-ak').value.trim(),
         accessKeySecret: $('#d-sk').value.trim(),
       }),
     });
     if (!d.ok) throw new Error(d.error || '验证失败');
-    ok.textContent = 'AccessKey 有效，账号下共 ' + d.domains + ' 个域名';
+    ok.textContent = d.domains > 0
+      ? p.name + ' 密钥有效，账号下共 ' + d.domains + ' 个域名'
+      : p.name + ' 密钥有效';
     ok.classList.remove('hidden');
   } catch (e) { showErr(err, e.message); }
 });
@@ -940,8 +1177,16 @@ setInterval(() => {
 
 /* ---------- 启动 ---------- */
 
-const TABS = ['overview', 'proxy', 'forward', 'ddns', 'acme', 'logs', 'settings'];
-const initial = location.hash.slice(1);
-if (TABS.includes(initial)) switchTab(initial);
+const TABS = ['overview', 'proxy', 'forward', 'ddns', 'acme', 'wol', 'term', 'logs', 'settings'];
 
-loadAll().catch(e => toast('加载失败：' + e.message, true));
+// 等 term.js 加载完再切初始页：hash 直接指到「终端」时 switchTab 会用到 TermUI
+document.addEventListener('DOMContentLoaded', async () => {
+  const initial = location.hash.slice(1);
+  if (TABS.includes(initial)) switchTab(initial);
+  try {
+    await loadProviders();
+    await loadAll();
+  } catch (e) {
+    toast('加载失败：' + e.message, true);
+  }
+});

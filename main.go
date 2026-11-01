@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -52,10 +53,32 @@ func main() {
 	}
 
 	// 内存调优：路由器上宁可多花点 CPU，也不要吃满内存
-	debug.SetGCPercent(40)
+	gcPct := cfg.Runtime.GCPercent
+	if gcPct <= 0 {
+		gcPct = 40
+	}
+	if v := os.Getenv("LP_GC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			gcPct = n
+		}
+	}
+	debug.SetGCPercent(gcPct)
 	if cfg.Runtime.MemLimitMB > 0 {
 		debug.SetMemoryLimit(int64(cfg.Runtime.MemLimitMB) << 20)
 	}
+
+	// 低负载时把空闲堆还给内核。Go 默认只在堆增长时才向 OS 要内存，
+	// 而缩容要走 scavenger 的慢路径，RSS 会长时间停在峰值。
+	// 路由器内存小、流量又断续，定期 FreeOSMemory 让 RSS 回落到真实需求。
+	go func() {
+		time.Sleep(45 * time.Second)
+		debug.FreeOSMemory()
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			debug.FreeOSMemory()
+		}
+	}()
 
 	logPath := cfg.Runtime.LogFile
 	if logPath == "" {
@@ -113,6 +136,9 @@ func (a *App) Shutdown() {
 	a.mu.Unlock()
 	for _, s := range servers {
 		s.Shutdown(ctx)
+	}
+	if a.term != nil {
+		a.term.closeAll()
 	}
 	a.logs.Close()
 }

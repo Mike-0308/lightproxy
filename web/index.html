@@ -21,6 +21,8 @@
     <button data-tab="forward">端口转发</button>
     <button data-tab="ddns">DDNS</button>
     <button data-tab="acme">证书</button>
+    <button data-tab="wol">唤醒</button>
+    <button data-tab="term">终端</button>
     <button data-tab="logs">日志</button>
     <button data-tab="settings">设置</button>
   </nav>
@@ -200,13 +202,15 @@
   <section id="tab-ddns" class="tab hidden">
     <div class="card">
       <div class="card-hd">
-        <h2>阿里云 DDNS</h2>
+        <h2>DDNS 动态域名</h2>
         <label class="switch"><input type="checkbox" id="d-enable"><span></span>启用</label>
       </div>
-      <p class="tip">只支持阿里云解析（AliDNS）。AccessKey 建议用子账号并只授予 <code>AliyunDNSFullAccess</code>。</p>
+      <p class="tip" id="d-hint">选择域名托管在哪家服务商，把密钥填进来即可。</p>
       <div class="form grid2">
-        <label class="row"><span>AccessKey ID</span><input id="d-ak" autocomplete="off" placeholder="LTAI..."></label>
-        <label class="row"><span>AccessKey Secret</span><input id="d-sk" type="password" autocomplete="new-password" placeholder="********"></label>
+        <label class="row"><span>服务商</span><select id="d-provider"></select></label>
+        <label class="row"><span>密钥申请</span><a class="link" id="d-docs" target="_blank" rel="noreferrer">控制台 →</a></label>
+        <label class="row"><span id="d-ak-lbl">AccessKey ID</span><input id="d-ak" autocomplete="off" placeholder="LTAI..."></label>
+        <label class="row" id="d-sk-row"><span id="d-sk-lbl">AccessKey Secret</span><input id="d-sk" type="password" autocomplete="new-password" placeholder="********"></label>
         <label class="row"><span>IP 获取方式</span>
           <select id="d-mode">
             <option value="api">在线接口查询（推荐）</option>
@@ -220,14 +224,14 @@
       </div>
 
       <h3 class="sub">解析记录</h3>
-      <p class="tip">「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。
+      <p class="tip" id="d-rectip">「域名」填主域名（<code>example.com</code>），「主机记录」填 <code>@</code>（根域）、<code>*</code>（泛解析）或 <code>home</code> 这类前缀。
         也可以直接在域名栏写完整域名 <code>*.example.com</code>，保存时会自动拆开。</p>
       <div id="recList" class="rec-list"></div>
       <button class="ghost sm" id="btnAddRec">+ 添加记录</button>
 
       <div class="actions wrap">
         <button class="primary" id="btnSaveDDNS">保存并生效</button>
-        <button class="ghost" id="btnTestAK">测试 AccessKey</button>
+        <button class="ghost" id="btnTestAK">测试密钥</button>
         <button class="ghost" id="btnDetectIP">检测公网 IP</button>
         <button class="ghost" id="btnRunDDNS">立即同步</button>
       </div>
@@ -238,6 +242,65 @@
     <div class="card">
       <div class="card-hd"><h2>同步状态</h2><span class="hint" id="ddnsMeta"></span></div>
       <div id="ddnsStatus" class="mini-list"></div>
+    </div>
+  </section>
+
+  <!-- 网络唤醒 -->
+  <section id="tab-wol" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>网络唤醒</h2>
+        <span class="hint">魔术包走 UDP，被唤醒设备关机也能收到</span>
+      </div>
+      <p class="tip">点「唤醒」会给这台设备的每块网卡各发一组魔术包。跨网段时把「广播地址」填成目标网段的广播地址（如 <code>192.168.31.255</code>），
+        同网段留空即可。唤醒后设备通常 10~30 秒开机，面板不会自动检测在线状态。</p>
+      <div id="wolList" class="mini-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>设备管理</h2><span class="hint">MAC 多个用逗号分隔</span></div>
+      <div class="wol-head"><span>名称</span><span>MAC</span><span>广播地址</span><span></span></div>
+      <div id="wolEdit"></div>
+      <button class="ghost sm" id="btnAddWol">+ 添加设备</button>
+      <div class="actions"><button class="primary" id="btnSaveWol">保存设备</button></div>
+      <div class="err hidden" id="wolErr"></div>
+    </div>
+  </section>
+
+  <!-- 终端 -->
+  <section id="tab-term" class="tab hidden">
+    <div class="card">
+      <div class="card-hd">
+        <h2>终端</h2>
+        <span class="hint" id="termHint"></span>
+      </div>
+      <p class="tip">关掉页面、手机锁屏、切网络都<b>不会</b>断开这里的 shell，重新打开这个页面会自动接回上一次的会话，
+        断开超过 <span id="term-keep">60</span> 分钟才回收。终端等于面板后面的一个 root shell，请务必先改掉面板默认密码。</p>
+      <div class="term-bar">
+        <label class="row inline"><span>本机</span><select id="term-shell"></select></label>
+        <button class="primary sm" id="btnTermLocal">打开</button>
+        <label class="row inline"><span>SSH</span><select id="term-ssh"></select></label>
+        <button class="ghost sm" id="btnTermSSH">连接</button>
+        <button class="ghost sm" id="btnTermRefresh">刷新会话</button>
+      </div>
+      <div id="termSessions" class="mini-list"></div>
+      <div class="err hidden" id="termErr"></div>
+    </div>
+
+    <div class="card hidden" id="termCard">
+      <div class="card-hd">
+        <h2 id="termTitle">终端</h2>
+        <div class="actions">
+          <span class="hint" id="termState"></span>
+          <button class="ghost sm" id="btnTermDetach">断开显示</button>
+          <button class="ghost sm danger-text" id="btnTermClose">结束会话</button>
+        </div>
+      </div>
+      <div id="termHost" class="term-host">
+        <pre id="termScreen" class="term-screen"></pre>
+        <textarea id="termInput" class="term-input" autocomplete="off" autocorrect="off"
+          autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
+      </div>
     </div>
   </section>
 
@@ -288,6 +351,27 @@
       <p class="tip">公网端口填外网实际访问的 HTTPS 端口（例如反代监听 8686 并从外网 8686 进来，就填 8686），跳转时会带上它。<br>
         浏览器里手抖写了 <code>http://域名:8686</code> 也没关系：反代端口会自己认出这是明文请求并跳到 <code>https://</code>，
         <b>「额外 HTTP 监听地址」留空就行</b>。只有需要另开一个端口（比如能用的 80）收 HTTP 时才填，而且不要填成反代端口本身。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>终端</h2>
+        <label class="switch"><input type="checkbox" id="t-enable"><span></span>启用</label>
+      </div>
+      <p class="tip">终端等于面板后面的一个 shell，<b>拿到面板密码就等于拿到这台机器的 root</b>。建议保持「只允许内网」，
+        出门在外先用安全入口进面板，再临时关掉这一项。SSH 的密码与私钥口令按明文保存在 <code>config.json</code>（权限 0600），
+        不放心就改用私钥、不填口令。</p>
+      <div class="form grid2">
+        <label class="row"><span>保活时长（分钟）</span><input id="t-keep" type="number" min="0" max="1440" step="5"></label>
+        <label class="row"><span>同时会话上限</span><input id="t-max" type="number" min="1" max="16"></label>
+        <label class="row"><span>默认本机 shell</span><input id="t-shell" placeholder="留空自动选择，例如 /bin/sh"></label>
+        <label class="row checks-inline"><span>来源限制</span>
+          <label class="chk"><input type="checkbox" id="t-lanonly"> 只允许内网来源打开终端</label>
+        </label>
+      </div>
+      <h3 class="sub">SSH 连接</h3>
+      <div class="ssh-head"><span>名称</span><span>主机</span><span>端口</span><span>用户</span><span>认证</span><span>密码 / 私钥路径</span><span></span></div>
+      <div id="sshList" class="ssh-list"></div>
+      <button class="ghost sm" id="btnAddSSH">+ 添加连接</button>
     </div>
 
     <div class="card">
@@ -348,5 +432,6 @@
 
 <div id="toast" class="toast"></div>
 <script src="/static/app.js"></script>
+<script src="/static/term.js"></script>
 </body>
 </html>

@@ -4,7 +4,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -48,18 +47,10 @@ func (e *APIError) Error() string {
 }
 
 func newAliyunClient(ak, sk string, insecure bool) *aliyunClient {
-	tr := &http.Transport{
-		Proxy:               nil,
-		MaxIdleConns:        4,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     60 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},
-	}
 	return &aliyunClient{
 		accessKey: ak,
 		secretKey: sk,
-		http:      &http.Client{Timeout: 20 * time.Second, Transport: tr},
+		http:      newDNSHTTPClient(insecure),
 	}
 }
 
@@ -296,3 +287,41 @@ func (c *aliyunClient) TestCredentials() (int, error) {
 	}
 	return total, nil
 }
+
+// ---------------- dnsProvider 适配 ----------------
+
+func (c *aliyunClient) Provider() string { return "aliyun" }
+
+func (c *aliyunClient) ListZones() ([]string, error) { return c.ListDomains() }
+
+func (c *aliyunClient) Records(zone, rr, typ string) ([]dnsHit, error) {
+	list, err := c.DescribeSubDomain(joinRR(zone, rr), typ)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dnsHit, 0, len(list))
+	for _, r := range list {
+		if typ != "" && !strings.EqualFold(r.Type, typ) {
+			continue
+		}
+		out = append(out, dnsHit{
+			ID: r.RecordID, Zone: zone, RR: r.RR, Type: r.Type,
+			Value: r.Value, TTL: r.TTL, Line: r.Line,
+		})
+	}
+	return out, nil
+}
+
+func (c *aliyunClient) Create(zone, rr, typ, value string, ttl int) (dnsHit, error) {
+	id, err := c.AddRecord(zone, rr, typ, value, ttl)
+	if err != nil {
+		return dnsHit{}, err
+	}
+	return dnsHit{ID: id, Zone: zone, RR: rr, Type: typ, Value: value, TTL: ttl}, nil
+}
+
+func (c *aliyunClient) Update(h dnsHit, value string, ttl int) error {
+	return c.UpdateRecord(h.ID, h.RR, h.Type, value, ttl)
+}
+
+func (c *aliyunClient) Test() (int, error) { return c.TestCredentials() }

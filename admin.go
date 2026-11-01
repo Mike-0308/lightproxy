@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.3.0"
+var version = "1.5.0"
 
 type App struct {
 	mu      sync.Mutex
@@ -48,6 +48,7 @@ type App struct {
 	started time.Time
 
 	sessions    *sessionStore
+	term        *termHub
 	needRestart bool
 	tlsActive   bool // 当前进程是否真的以 HTTPS 在跑（没有证书时先退回 HTTP）
 }
@@ -78,6 +79,7 @@ func NewApp(cfgPath string, cfg *Config, logs *LogBuffer) *App {
 		started:  time.Now(),
 		sessions: newSessionStore(12 * time.Hour),
 	}
+	a.term = newTermHub(logs)
 	p, err := NewProxy(cfg, logs)
 	if err == nil {
 		a.proxy.Store(p)
@@ -188,6 +190,18 @@ func (a *App) ApplyConfig(next *Config, persist bool) error {
 
 func (a *App) Start() error {
 	cfg := a.Config()
+
+	// 终端会话的保活清理：断开超过 keepMin 分钟、或者已经退出的会话在这里回收。
+	// 只有一个 30 秒的 ticker，没有会话时不占额外内存。
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			if keep := a.Config().Term.KeepMin; keep > 0 {
+				a.term.reapIdle(time.Duration(keep) * time.Minute)
+			}
+		}
+	}()
 
 	var servers []*http.Server
 	handler := a.proxyHandler()
@@ -587,6 +601,7 @@ func (a *App) adminHandler() http.Handler {
 	mux.HandleFunc("/api/ddns/run", a.authed(a.handleDDNSRun))
 	mux.HandleFunc("/api/ddns/test", a.authed(a.handleDDNSTest))
 	mux.HandleFunc("/api/ddns/ip", a.authed(a.handleDDNSIP))
+	mux.HandleFunc("/api/ddns/providers", a.authed(a.handleDDNSProviders))
 	mux.HandleFunc("/api/logs", a.authed(a.handleLogs))
 	mux.HandleFunc("/api/forward/apply", a.authed(a.handleForwardApply))
 	mux.HandleFunc("/api/forward/clear", a.authed(a.handleForwardClear))
@@ -594,6 +609,12 @@ func (a *App) adminHandler() http.Handler {
 	mux.HandleFunc("/api/acme/test", a.authed(a.handleACMETest))
 	mux.HandleFunc("/api/reload", a.authed(a.handleReload))
 	mux.HandleFunc("/api/restart", a.authed(a.handleRestart))
+
+	// 网络唤醒与 Web 终端
+	mux.HandleFunc("/api/wol/wake", a.authed(a.handleWOLWake))
+	mux.HandleFunc("/api/term/info", a.authed(a.handleTermInfo))
+	mux.HandleFunc("/api/term/sessions", a.authed(a.handleTermSessions))
+	mux.HandleFunc("/api/term/ws", a.authed(a.handleTermWS))
 	return mux
 }
 
@@ -926,27 +947,47 @@ func (a *App) handleDDNSRun(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDDNSTest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Provider        string `json:"provider"`
 		AccessKeyID     string `json:"accessKeyId"`
 		AccessKeySecret string `json:"accessKeySecret"`
 	}
 	json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body)
 
 	cfg := a.Config().DDNS
+	if body.Provider != "" {
+		cfg.Provider = body.Provider
+	}
 	if body.AccessKeyID != "" {
 		cfg.AccessKey = strings.TrimSpace(body.AccessKeyID)
+	}
+	if body.AccessKeySecret != "" {
 		cfg.SecretKey = strings.TrimSpace(body.AccessKeySecret)
 	}
-	if cfg.AccessKey == "" || cfg.SecretKey == "" {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "请先填写 AccessKey ID 与 Secret"})
+	spec, _ := providerSpecOf(cfg.Provider)
+	if strings.TrimSpace(cfg.AccessKey) == "" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "请先填写 " + spec.KeyLbl})
 		return
 	}
-	c := newAliyunClient(cfg.AccessKey, cfg.SecretKey, cfg.Insecure)
-	n, err := c.TestCredentials()
+	if spec.NeedSec && strings.TrimSpace(cfg.SecretKey) == "" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "请先填写 " + spec.SecLbl})
+		return
+	}
+	p, err := newDNSProvider(cfg)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "domains": n})
+	n, err := p.Test()
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "domains": n, "provider": normalizeProvider(cfg.Provider)})
+}
+
+// handleDDNSProviders 把服务商清单交给前端，避免前后端各维护一份硬编码。
+func (a *App) handleDDNSProviders(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"providers": providerSpecs})
 }
 
 func (a *App) handleDDNSIP(w http.ResponseWriter, r *http.Request) {
