@@ -61,16 +61,20 @@ func buildRule(r Rule, logs *LogBuffer) (*compiledRule, error) {
 	prefix := normalizePath(r.Path)
 	upstream := r.Target
 
+	// 连接池和缓冲区都按「路由器够用就好」来设：
+	// 每条 keep-alive 连接在 Go 里固定吃 2×ReadBufferSize/WriteBufferSize，
+	// 8KB 缓冲 + 24 条上限，比默认值省一半左右的常驻内存，
+	// 家用并发（十几条）根本碰不到上限。
 	tr := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:          48,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       45 * time.Second,
+		MaxIdleConns:          24,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
-		ReadBufferSize:        16 << 10,
-		WriteBufferSize:       16 << 10,
+		ReadBufferSize:        8 << 10,
+		WriteBufferSize:       8 << 10,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: r.Insecure},
 	}
 

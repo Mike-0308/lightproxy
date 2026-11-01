@@ -24,6 +24,8 @@ type Config struct {
 	ACME     ACMEConfig     `json:"acme"`
 	Forward  ForwardConfig  `json:"forward"`
 	Runtime  RuntimeConfig  `json:"runtime"`
+	WOL      WOLConfig      `json:"wol"`
+	Term     TermConfig     `json:"term"`
 
 	// baseDir 是配置文件所在目录（不序列化），用来推导默认证书目录：
 	// 装到 /data/lightproxy 时，证书自动落在 /data/lightproxy/certs。
@@ -112,6 +114,7 @@ type DNSRecord struct {
 
 type RuntimeConfig struct {
 	MemLimitMB int    `json:"memLimitMB"`
+	GCPercent  int    `json:"gcPercent,omitempty"`
 	AccessLog  bool   `json:"accessLog"`
 	LogFile    string `json:"logFile"`
 }
@@ -188,7 +191,45 @@ func DefaultConfig() *Config {
 		Forward:  ForwardConfig{Backend: "auto"},
 		Security: SecurityConfig{AllowLoopback: true},
 		Runtime:  RuntimeConfig{MemLimitMB: 32, AccessLog: false},
+		// 唤醒只有 UDP，没有常驻开销，默认开着。
+		WOL: WOLConfig{Devices: []WOLDevice{}},
+		// 终端默认也开，但限制内网来源；它等于面板后面的一个 root shell，
+		// 所以 LANOnly 默认 true，要公网用必须自己关掉这一项。
+		Term: TermConfig{
+			Enable: true, LANOnly: true, KeepMin: 60, MaxSessions: 4,
+			SSH: []SSHConn{},
+		},
 	}
+}
+
+// WOLConfig 是网络唤醒的设备表，只存设备信息，不存状态。
+type WOLConfig struct {
+	Devices []WOLDevice `json:"devices"`
+}
+
+// TermConfig 是 Web 终端配置。
+type TermConfig struct {
+	Enable      bool      `json:"enable"`
+	LANOnly     bool      `json:"lanOnly"`
+	KeepMin     int       `json:"keepMin"`     // 断开后保留会话的分钟数，0 表示断开即销毁
+	MaxSessions int       `json:"maxSessions"` // 同时存在的会话上限
+	Shell       string    `json:"shell"`       // 本机终端默认 shell，留空自动选
+	SSH         []SSHConn `json:"ssh"`
+}
+
+// SSHConn 是一条保存下来的 SSH 连接。
+// 密码与私钥口令按明文存在 config.json 里（和 AccessKey 一样），
+// 文件权限 0600；不想落盘就只用私钥，不填口令。
+type SSHConn struct {
+	Name     string `json:"name"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Auth     string `json:"auth"` // password | key
+	Password string `json:"password,omitempty"`
+	KeyPath  string `json:"keyPath,omitempty"`
+	KeyPass  string `json:"keyPass,omitempty"`
+	Insecure bool   `json:"insecure,omitempty"` // 跳过主机密钥校验（旧设备常见）
 }
 
 // setBaseFrom 记录配置文件所在目录，供 deriveCertDir 推导默认证书目录。
@@ -483,6 +524,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.Runtime.MemLimitMB > 0 && c.Runtime.MemLimitMB < 16 {
 		c.Runtime.MemLimitMB = 16
+	}
+	if err := c.normalizeTerm(); err != nil {
+		return err
 	}
 	return nil
 }

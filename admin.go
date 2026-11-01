@@ -30,7 +30,7 @@ var webFS embed.FS
 
 var webSub, _ = fs.Sub(webFS, "web")
 
-var version = "1.3.0"
+var version = "1.4.0"
 
 type App struct {
 	mu      sync.Mutex
@@ -48,6 +48,7 @@ type App struct {
 	started time.Time
 
 	sessions    *sessionStore
+	term        *termHub
 	needRestart bool
 	tlsActive   bool // 当前进程是否真的以 HTTPS 在跑（没有证书时先退回 HTTP）
 }
@@ -78,6 +79,7 @@ func NewApp(cfgPath string, cfg *Config, logs *LogBuffer) *App {
 		started:  time.Now(),
 		sessions: newSessionStore(12 * time.Hour),
 	}
+	a.term = newTermHub(logs)
 	p, err := NewProxy(cfg, logs)
 	if err == nil {
 		a.proxy.Store(p)
@@ -188,6 +190,18 @@ func (a *App) ApplyConfig(next *Config, persist bool) error {
 
 func (a *App) Start() error {
 	cfg := a.Config()
+
+	// 终端会话的保活清理：断开超过 keepMin 分钟、或者已经退出的会话在这里回收。
+	// 只有一个 30 秒的 ticker，没有会话时不占额外内存。
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			if keep := a.Config().Term.KeepMin; keep > 0 {
+				a.term.reapIdle(time.Duration(keep) * time.Minute)
+			}
+		}
+	}()
 
 	var servers []*http.Server
 	handler := a.proxyHandler()
@@ -594,6 +608,12 @@ func (a *App) adminHandler() http.Handler {
 	mux.HandleFunc("/api/acme/test", a.authed(a.handleACMETest))
 	mux.HandleFunc("/api/reload", a.authed(a.handleReload))
 	mux.HandleFunc("/api/restart", a.authed(a.handleRestart))
+
+	// 网络唤醒与 Web 终端
+	mux.HandleFunc("/api/wol/wake", a.authed(a.handleWOLWake))
+	mux.HandleFunc("/api/term/info", a.authed(a.handleTermInfo))
+	mux.HandleFunc("/api/term/sessions", a.authed(a.handleTermSessions))
+	mux.HandleFunc("/api/term/ws", a.authed(a.handleTermWS))
 	return mux
 }
 

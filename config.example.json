@@ -94,7 +94,39 @@
   },
   "runtime": {
     "memLimitMB": 32,
+    "gcPercent": 40,
     "accessLog": false,
     "logFile": ""
+  },
+  "wol": {
+    "devices": [
+      {
+        "name": "群晖",
+        "macs": ["00:11:32:AA:BB:CC"],
+        "broadcast": "",
+        "port": 9,
+        "repeat": 3
+      }
+    ]
+  },
+  "term": {
+    "enable": true,
+    "lanOnly": true,
+    "keepMin": 60,
+    "maxSessions": 4,
+    "shell": "",
+    "ssh": [
+      {
+        "name": "群晖",
+        "host": "192.168.31.10",
+        "port": 22,
+        "user": "root",
+        "auth": "password",
+        "password": "",
+        "keyPath": "",
+        "keyPass": "",
+        "insecure": false
+      }
+    ]
   }
 }

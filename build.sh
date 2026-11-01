@@ -7,13 +7,31 @@ GO=${GO:-go}
 VER=$(grep -m1 '^var version' admin.go | sed 's/.*"\(.*\)".*/\1/')
 export CGO_ENABLED=0
 
+# 可选 UPX 压缩：体积能降到三分之一，但运行时要把整个映像解压进内存，
+# 常驻内存会多出约 7MB。只在闪存/磁盘吃紧、内存宽裕时才开。
+#   UPX=upx ./build.sh
+UPX=${UPX:-}
+if [ -n "$UPX" ] && ! command -v "$UPX" >/dev/null 2>&1; then
+	echo "找不到 $UPX，继续不压缩" >&2
+	UPX=""
+fi
+
+LDF="-s -w -X main.version=$VER"
 mkdir -p dist
 echo "构建 lightproxy v$VER（静态链接，无 CGO 依赖）"
 
-GOOS=linux GOARCH=arm GOARM=7 $GO build -trimpath -ldflags "-s -w -X main.version=$VER" -o dist/lightproxy-linux-armv7 .
-GOOS=linux GOARCH=arm64     $GO build -trimpath -ldflags "-s -w -X main.version=$VER" -o dist/lightproxy-linux-arm64 .
-GOOS=linux GOARCH=amd64     $GO build -trimpath -ldflags "-s -w -X main.version=$VER" -o dist/lightproxy-linux-amd64 .
-GOOS=linux GOARCH=mipsle GOMIPS=softfloat $GO build -trimpath -ldflags "-s -w -X main.version=$VER" -o dist/lightproxy-linux-mipsle .
-GOOS=windows GOARCH=amd64   $GO build -trimpath -ldflags "-s -w -X main.version=$VER" -o dist/lightproxy-windows-amd64.exe .
+build() { # build <输出> <GOOS> <GOARCH> [GOARM|GOMIPS]
+	out="dist/$1"; os=$2; arch=$3; extra=$4
+	env GOOS=$os GOARCH=$arch ${extra:+$extra} $GO build -trimpath -ldflags "$LDF" -o "$out" .
+	if [ -n "$UPX" ]; then
+		"$UPX" -q "$out"
+	fi
+}
+
+build lightproxy-linux-armv7  linux arm   GOARM=7
+build lightproxy-linux-arm64  linux arm64
+build lightproxy-linux-amd64  linux amd64
+build lightproxy-linux-mipsle linux mipsle GOMIPS=softfloat
+build lightproxy-windows-amd64.exe windows amd64
 
 ls -lh dist

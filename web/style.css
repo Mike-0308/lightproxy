@@ -247,3 +247,104 @@ button.block { width: 100%; justify-content: center; }
   .fw-row { grid-template-columns: 1fr 1fr; gap: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
   .fw-row .del { grid-column: span 2; justify-self: end; }
 }
+
+/* ── 网络唤醒 ── */
+.wol-head, .wol-row {
+  display: grid;
+  grid-template-columns: 1.1fr 2fr 1.2fr 36px;
+  gap: 8px;
+  align-items: center;
+}
+.wol-head { font-size: 11.5px; color: var(--muted); padding: 0 2px 5px; }
+.wol-row { padding-bottom: 8px; }
+.wol-row input {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13px; font-family: inherit; outline: none; background: #fff; width: 100%;
+}
+.wol-row input:focus { border-color: var(--accent); }
+.wol-row .del, .ssh-row .del {
+  background: none; border: 0; cursor: pointer; color: var(--muted); font-size: 17px; padding: 0;
+}
+.wol-row .del:hover, .ssh-row .del:hover { color: var(--err); }
+
+/* ── SSH 连接表 ── */
+.ssh-head, .ssh-row {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr 68px 0.9fr 82px 1.5fr 36px;
+  gap: 8px;
+  align-items: center;
+}
+.ssh-head { font-size: 11.5px; color: var(--muted); padding: 0 2px 5px; }
+.ssh-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ssh-row input, .ssh-row select {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13px; font-family: inherit; outline: none; background: #fff; width: 100%;
+}
+.ssh-row input:focus, .ssh-row select:focus { border-color: var(--accent); }
+
+@media (max-width: 680px) {
+  .wol-head, .ssh-head { display: none; }
+  .wol-row { grid-template-columns: 1fr 1fr; border-bottom: 1px dashed var(--line); }
+  .wol-row .del { grid-column: span 2; justify-self: end; }
+  .ssh-row { grid-template-columns: 1fr 1fr; border-bottom: 1px dashed var(--line); }
+  .ssh-row .del { grid-column: span 2; justify-self: end; }
+}
+
+/* ── 终端 ── */
+.term-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.row.inline { flex-direction: row; align-items: center; gap: 8px; }
+.row.inline select { width: auto; min-width: 150px; }
+
+.term-host {
+  position: relative;
+  margin-top: 12px;
+  height: min(62vh, 560px);
+  min-height: 300px;
+  padding: 10px 12px;
+  background: #12161a;
+  border: 1px solid #0b0e11;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.term-screen {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  white-space: pre;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.25;
+  color: #d8e0e6;
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+}
+.term-screen .cur {
+  background: #cfd8dd;
+  color: #12161a;
+  animation: term-blink 1.1s steps(1) infinite;
+}
+@keyframes term-blink { 50% { background: transparent; color: #d8e0e6; } }
+.term-input {
+  position: absolute;
+  left: 8px;
+  bottom: 4px;
+  width: 2px;
+  height: 2px;
+  padding: 0;
+  border: 0;
+  opacity: .01;
+  resize: none;
+  overflow: hidden;
+}
+.term-probe {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  visibility: hidden;
+  white-space: pre;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+.term-boot { color: #6b7d79; }

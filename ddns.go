@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -452,7 +451,32 @@ func (m *DDNSManager) TestCredentials() (int, error) {
 
 // ---------------- 公网 IP 探测 ----------------
 
-var ipTokenRe = regexp.MustCompile(`[0-9a-fA-F:.]+`)
+// eachIPToken 按 [0-9a-fA-F:.]+ 切出候选片段，等价于原来的正则扫描。
+// 用裸循环代替 regexp，省掉 regexp + regexp/syntax 约 110KB 的代码体积，
+// 也顺手避免了 FindAllString 对整段 body 的切片分配。
+// fn 返回 true 时提前结束。
+func eachIPToken(s string, fn func(tok string) bool) {
+	start := -1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		hex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if hex || c == ':' || c == '.' {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if fn(s[start:i]) {
+				return
+			}
+			start = -1
+		}
+	}
+	if start >= 0 {
+		fn(s[start:])
+	}
+}
 
 func (m *DDNSManager) detect(family int) (string, error) {
 	if m.cfg.IPMode == "interface" {
@@ -498,20 +522,27 @@ func fetchIP(src string, family int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, tok := range ipTokenRe.FindAllString(string(body), -1) {
+	var found string
+	eachIPToken(string(body), func(tok string) bool {
 		ip := net.ParseIP(strings.Trim(tok, ".:"))
 		if ip == nil {
-			continue
+			return false
 		}
 		if family == 4 {
 			if v4 := ip.To4(); v4 != nil && isPublic(v4) {
-				return v4.String(), nil
+				found = v4.String()
+				return true
 			}
-			continue
+			return false
 		}
 		if ip.To4() == nil && isPublic(ip) {
-			return ip.String(), nil
+			found = ip.String()
+			return true
 		}
+		return false
+	})
+	if found != "" {
+		return found, nil
 	}
 	return "", fmt.Errorf("%s 未返回公网 IPv%d", src, family)
 }
