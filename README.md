@@ -2,16 +2,13 @@
 
 **许可证：MIT** —— 可自由使用、修改、商用、再分发，保留版权声明即可（详见文末 License）。
 
-给内存吃紧的路由器用的 **反向代理 + 端口转发 + DDNS（8 家服务商）+ 自动证书 + 网络唤醒 + Web 终端**。软件为本人自用，让AI针对小米CR8808设计，其它机型未经测试，发现的友友可以自测。
+给内存吃紧的路由器做的 **反向代理 + 端口转发 + DDNS（8 家服务商）+ 自动证书 + 网络唤醒 + Web 终端**。软件为本人自用，让 AI 针对小米 CR8808 设计，其它机型未经测试，发现的友友可以自测。
 
-- 单文件，静态链接：约 7.3MB（armv7），五个架构合计约 38MB
-- 常驻内存实测 17~22MB，空闲时更低（40 条并发连接时约 +2.6MB；不打开终端时新功能零开销）
-- 自带 Web 管理面板，配置热更新，改规则不用重启
-- 业务代码纯 Go 标准库实现（八家 DNS 的签名全部照官方算法手写，阿里云签名有单元测试与官方 SDK 逐字节对拍）；
-  唯一的第三方依赖是 `golang.org/x/crypto/ssh`（Web 终端的 SSH 客户端，约 340KB），WOL、WebSocket、PTY 全部手写
+一个进程包办上面这几件事，全部在 Web 面板里改，保存即生效；配置就是一份 `config.json`，随时可以备份带走。
 
-为小内存路由器（256MB 级别）设计，兼容任何有 SSH 的 Linux 设备。
-体积和内存已经是这套功能在 Go 下的水位，压不太动了，原因和可选手段写在第「十」节。
+## 目录
+
+[功能](#功能) · [安装](#安装) · [卸载](#卸载) · [开机自启](#开机自启) · [让外网访问到](#让外网访问到推荐配置流程) · [配置 DDNS](#配置-ddns) · [配置 HTTPS](#配置-https) · [配置端口转发](#配置端口转发) · [配置字段速查](#配置字段速查) · [排查](#排查) · [自己编译](#自己编译) · [项目结构](#项目结构) · [测试覆盖](#测试覆盖) · [License](#license)
 
 ## 功能
 
@@ -58,7 +55,8 @@
 - 改入口或改面板密码，旧票据立即失效；**内网与本机始终可以直接访问**，不会把自己锁在外面
 - 域名本身是公开的（证书透明日志里就有），这一层是「只允许域名访问」之外的又一道保险
 
-**配置备份**- 设置页一键导出为一个 zip 包：配置 + 证书 + 证书私钥 + ACME 账户密钥（含 AccessKey，注意保管）
+**配置备份**
+- 设置页一键导出为一个 zip 包：配置 + 证书 + 证书私钥 + ACME 账户密钥（含 AccessKey，注意保管）
 - 导入即恢复配置与证书并热加载，换机器/重装后直接可用，不用重新签发；导入前先校验，不合法的包不生效
 
 **网络唤醒（WOL）**
@@ -78,6 +76,7 @@
 **自动证书（ACME DNS-01）**
 - 支持 Let's Encrypt（含测试环境）与 ZeroSSL，CA 地址可自定义
 - DNS-01 验证走阿里云解析：自动添加/清理 TXT 记录，不占 80 端口、不与反代抢路径、支持泛域名
+  （**与 DDNS 里选的服务商无关**，签证书这条路目前只走阿里云）
 - AccessKey 留空自动复用 DDNS 的（运行时复用，改 DDNS 密钥这里跟着变）
 - 证书自动保存在安装目录的 `certs/`（如 `/data/lightproxy/certs`），不用填目录；签发后自动热加载，后台每小时巡检，剩余有效期低于阈值（默认 30 天）自动续
 - 「检查配置」可提前验证 AccessKey 与每个域名能否找到解析，避免签发一半才失败
@@ -100,7 +99,7 @@
 
 ## 安装
 
-路由器 SSH 里执行，会弹出向导（先选做什么，再选装到哪）：
+路由器 SSH 里执行，跟着向导走就行：
 
 **国内推荐用 Gitee（直连，不用镜像绕路）：**
 
@@ -120,7 +119,7 @@ curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/
 > 想强制指定某个源：`LP_MIRROR=https://your.mirror sh /tmp/lp.sh`；
 > Gitee 仓库换成自己的：`LP_GITEE=你的用户名/lightproxy sh /tmp/lp.sh`。
 
-向导长这样：
+向导长这样（先选做什么，再选装到哪）：
 
 ```
 ──────────────────────────────────────────
@@ -130,11 +129,7 @@ curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/
   2) 卸载
   3) 退出
 请选择 [1]:
-```
 
-选完再选安装目录：
-
-```
  选择安装目录
   1) /data/lightproxy   （推荐，重启不丢）
   2) /opt/lightproxy
@@ -147,14 +142,14 @@ curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/
 
 之后脚本自动完成：识别架构 → 下载对应二进制 → 试运行自检 → 写默认配置 → 挂开机自启 → 启动。
 
-**下载 7MB 左右，网慢要等几分钟**，脚本会把话说清楚：有进度条；卡住时每 10 秒打一个 `[秒数]` 表示还在等；某个源连不上自动换镜像（Gitee → GitHub → `ghfast.top` → `gh-proxy.com` → `ghproxy.net`），不用你干预。
+**下载量不大（二进制约 7MB），网慢也就几分钟**：脚本有进度条，卡住时每 10 秒打一个 `[秒数]` 表示还在等，不用反复重试。
 
 > 之前装过的话，向导会提示「检测到已安装在 xxx」，选它即为升级，配置和证书都保留。
 
 管道方式也能弹菜单（脚本从 `/dev/tty` 读输入，不抢 stdin）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh
+curl -fsSL https://gitee.com/jxmike/lightproxy/raw/main/scripts/install.sh | sh
 ```
 
 不想交互（写进别的脚本里批量跑）：
@@ -207,7 +202,7 @@ ssh root@192.168.10.1 "sh /tmp/install.sh /data/lightproxy/bin/lightproxy"
 sh /tmp/lp.sh --uninstall
 
 # 没传过脚本时，一行远程卸载
-curl -fsSL https://raw.githubusercontent.com/Mike-0308/lightproxy/main/scripts/install.sh | sh -s -- --uninstall
+curl -fsSL https://gitee.com/jxmike/lightproxy/raw/main/scripts/install.sh | sh -s -- --uninstall
 ```
 
 会先列出找到的所有安装目录（`/data/lightproxy`、`/opt/lightproxy`、`/etc/lightproxy`、`/tmp/lightproxy`），确认后先摘掉开机挂钩再停进程（避免 procd 的 respawn 又拉起来），最后删除目录。
@@ -239,12 +234,12 @@ DDNS 只解决「域名指向你的 IP」，还要把端口放进来。推荐这
 1. **路由器后台做端口映射**：比如把外网 `8443` 映射到路由器自身 `16666`（反代监听端口）。
    不想用后台的话，也可以用 **面板 → 端口转发**：加一条 `8443 → 路由器LAN IP:16666` 的规则，
    「保存并下发」后规则持久化、重启自动恢复。
-2. **反代监听端口会自动放行（IPv4 + IPv6）**：无论是否使用面板的端口转发功能，lightproxy 都会把自己的
-   监听端口（反代 `16666`，开了 HTTP 跳转再加跳转端口）写进 INPUT 放行，并做成开机脚本
-   挂到防火墙配置上。小米等固件的端口映射只放行原始外网端口、不放行转换后的本机端口，
-   这一步就是补上它的。IPv6 没有 NAT，外网直接打到路由器自身，而 fw3 的 `zone_wan_input`
-   末尾是 REJECT——所以 v6 也要单独放行（`LP_IN6` 链），否则只有 AAAA 记录时表现为
-   「域名能解析、端口也映射了，就是打不开」。管理面板端口永远不会被放行。
+2. **反代监听端口会自动放行（IPv4 + IPv6）**：无论用不用面板的端口转发，lightproxy 都会把自己监听的端口
+   （反代 `16666`，开了 HTTP 跳转再加跳转端口）写进 INPUT 放行，并做成开机脚本挂到防火墙配置上。
+   小米等固件的端口映射只放行原始外网端口、不放行转换后的本机端口，这一步正是补它。
+   IPv6 没有 NAT，外网直接打到路由器自身，而 fw3 的 `zone_wan_input` 末尾是 REJECT，所以 v6 也要单独放行
+   （`LP_IN6` 链）——否则只有 AAAA 记录时会表现成「域名能解析、端口也映射了，就是打不开」。
+   管理面板端口永远不会被放行。
 3. **路由器自带防火墙**（如 IPv6 防火墙）可以放心全开——只放行了上述端口。
 4. **面板 → 设置 → 访问控制**：打开「只允许域名访问」，外网拿 IP 扫不到你的服务（内网不受影响）。
    同时建议加一条反代规则把面板藏在域名后面：`panel.example.com → http://127.0.0.1:18080`。
@@ -387,11 +382,17 @@ PPPoE 拨号且运营商不给公网 IPv4 时，可加一条 AAAA 记录走 IPv6
 装 Go 1.22+，然后：
 
 ```bash
-./build.sh    # 产出 dist/ 下全部架构
-go test ./... # 单测（含与官方 SDK 对拍的签名测试）
+./build.sh        # 产出 dist/ 下全部架构（armv7 / arm64 / amd64 / mipsle / windows）
+go test ./...     # 单测（含与官方 SDK 对拍的签名测试）
 ```
 
-发布：推一个 `v*` 标签，GitHub Actions 会自动构建五个平台并发布 Release。
+想确认各家 DNS 接口能连通（用假密钥，只看签名有没有被服务端认下来），可以单独跑：
+
+```bash
+go test -tags live -run TestLiveProviderReach -v -timeout 120s
+```
+
+发布：仓库已配好 GitHub Actions，推一个 `v*` 标签就会跑测试、构建五个平台并发布 Release。
 
 ## 项目结构
 
@@ -423,8 +424,9 @@ lightproxy/
 ├── ssh.go             SSH 客户端会话（x/crypto/ssh，keepalive）
 ├── logs.go            环形日志（512KB 自动轮转）
 ├── web/               内嵌前端（单页，无框架）
-├── scripts/install.sh 路由器安装脚本（向导式：安装 / 卸载 / 选目录）
-└── test/              mock 阿里云 API、echo 后端、WS 测试
+├── scripts/           install.sh 安装向导、elfcheck.go 产物架构核对
+├── test/              mock 阿里云 API、echo 后端、WS 终端测试脚本
+└── .github/workflows/ release.yml：推 v* 标签自动构建五个平台并发布
 ```
 
 ## 测试覆盖
@@ -444,90 +446,9 @@ lightproxy/
 - 同端口协议嗅探：TLS 握手记录走 TLS 侧、明文 `GET` 走跳转侧、只发一个字节也能还原完整请求、关闭监听后不阻塞
 - HTTP 跳转：Location 保留原始路径与查询串，公网端口非 443 时带上端口；`http://` 误连 HTTPS 端口回 307 且端口不变；
   「额外 HTTP 监听」与反代端口写成同一个时不再重复监听（`sameListenPort`），防火墙放行也不会重复
-- DDNS：泛域名/FQDN 自动拆分（`*.example.com` → 主域名 + `*`）
+- DDNS：8 家服务商清单自检、同步三个分支（新增 / 更新 / 值未变不写 API）、创建失败回查转更新、
+  各家签名工具（canonical 查询串、华为 CanonicalURI、DuckDNS 子域名还原）、泛域名/FQDN 自动拆分
 - 配置校验：端口冲突（TCP/UDP 分开）、目标必须 IPv4、ACME 域名合法性、密钥复用不写回
-
-## 体积与内存
-
-这一节把实测数字写清楚，省得反复问「还能不能更小」。结论是：**已经到底了，再压就是拿别的资源换**。
-
-### 二进制
-
-| 架构 | v1.3.0（无终端） | v1.4.0（含 WOL + 终端） | v1.5.0（含 8 家 DDNS） |
-|---|---|---|---|
-| linux/armv7 | 6,946,968 B | 7,536,792 B（7.2MB，+576KB） | 7,667,864 B（+131KB） |
-| linux/arm64 | 7,143,576 B | 7,405,720 B | 7,602,328 B |
-| linux/amd64 | 7,205,016 B | 7,774,360 B（7.4MB） | 7,934,104 B（+160KB） |
-| linux/mipsle | 7,930,039 B | 8,519,863 B（8.1MB） | 8,650,935 B（+131KB） |
-| windows/amd64 | 7.2MB | 7.6MB | 7.8MB |
-
-v1.5.0 的增量就是 7 家新服务商的适配层：每家 4 个 HTTP 接口 + 一份手写签名，合计约 150KB（armv7），没有引入任何 SDK 依赖。常量表、JSON 结构、错误翻译都是纯代码，Go 编译器会把用不到的部分裁掉。
-
-增量构成：SSH 客户端约 340KB、WebSocket/PTY/会话管理约 25KB、终端页前端脚本约 30KB（随二进制 embed）、其余是 x/crypto 的间接依赖。
-
-构建参数：`-trimpath -ldflags "-s -w"`，`CGO_ENABLED=0` 纯静态，不带 DWARF 和符号表。
-
-已经做过的瘦身：
-
-- **去掉唯一的 `regexp` 用法**（探测公网 IP 时切 token），改成裸循环扫描。省 256KB —— 引入 `regexp` 会连带拖进 `regexp/syntax` 和整张 unicode 表。
-- 上游连接池缓冲 16KB → 8KB，idle 连接上限 48 → 24，超时 45s → 30s。
-
-剩下的都是硬成本：
-
-| 部分 | 体积 | 说明 |
-|---|---|---|
-| runtime + net/http + net | 约 1.2MB | 程序骨架，省不掉 |
-| crypto/tls + x509 | 约 420KB | HTTPS 必需 |
-| crypto/internal/nistec/fiat | 约 240KB | P-384 / P-521 曲线，删了有些站点证书验不过 |
-| encoding/json | 约 90KB | 配置与面板 API |
-| main 包（全部业务代码，9000 行） | 约 224KB | 反代、转发、DDNS、ACME、面板 |
-
-### 想更小：UPX（默认不开）
-
-```sh
-UPX=upx ./build.sh     # 需要先装 upx
-```
-
-7.21MB → **2.43MB**（-65%）。代价：
-
-- 运行时要把整个映像解压进内存，**常驻内存多 7.5MB**（实测 21.8 → 25.1MB）
-- 启动慢 50~200ms
-- `go version -m` 读不到模块信息，`dlv` 调试失效
-
-256MB 内存的机器不缺这 7MB，但闪存特别紧的话可以开。
-
-### 内存
-
-| 场景 | 常驻 |
-|---|---|
-| 刚启动 | 17.7MB |
-| 空闲稳态 | 16.5~17.9MB |
-| 40 条并发 keep-alive | 19.1MB（+2.6MB） |
-| 40 条连接关闭后 | 回落到 17.7MB |
-| 终端功能不使用时 | +0（无后台任务、无定时器） |
-| 每开一个终端会话 | 约 +60~120KB（goroutine 栈、8KB 读写缓冲、PTY/SSH 通道），关闭即释放 |
-
-每条约 64KB（服务端收发缓冲 + 上游侧收发缓冲），是 Go `net/http` 的固定开销，**不随规则条数增长**。
-
-已经做的调优：
-
-- `debug.SetGCPercent(40)`：默认 100 太懒，路由器上宁可多跑几次 GC
-- 每 5 分钟 `debug.FreeOSMemory()`：把空闲堆还给内核。不做这个，RSS 会一直停在历史峰值
-- `runtime.memLimitMB`（默认 32）：堆软上限，撞上限就强制 GC
-- `runtime.gcPercent`：可覆盖 GC 百分比
-
-实测过但**收益接近零**的：
-
-- GCPercent 40 → 20：中位 21.07 → 21.26MB，等于没变。说明瓶颈不在 GC 堆，而在 runtime 骨架和连接缓冲
-- 继续压连接缓冲：40 条并发只省 0.2MB
-
-唯一还有明显效果的是把 P 数量降下来（每核约 1.3MB）。双核路由器上：
-
-```sh
-GOMAXPROCS=1 /path/to/lightproxy -c /etc/lightproxy/config.json
-```
-
-能省 1.3MB 左右，代价是 TLS 握手串行化，几十个客户端同时建连时会略慢。自用场景基本无感，要不要开自己权衡。
 
 ## License
 
@@ -535,7 +456,8 @@ MIT License © 2026 jxmike
 
 可以自由使用、修改、商用、再分发，唯一要求是保留版权声明和许可证正文（见仓库根目录 `LICENSE`）。
 
-- 本项目为纯 Go 标准库实现，`go.sum` 为空，**不包含任何第三方依赖**，也不含 GPL / AGPL 代码
+- 除 `golang.org/x/crypto`（BSD-3-Clause，Web 终端的 SSH 客户端）及其间接依赖 `golang.org/x/sys` 外，
+  其余代码全部基于 Go 标准库实现，不含任何 GPL / AGPL 代码
 - 若你把 sing-box / mihomo / xray 等第三方核心的二进制打包进 Release 一起分发，
   需另行遵守它们各自的许可证（分别为 GPL-3.0 / GPL-3.0 / MPL-2.0）；
   本项目的安装脚本是让用户从上游自行下载，不属于再分发。
